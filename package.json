@@ -1,0 +1,28 @@
+{
+  "name": "priya-ai-assist",
+  "version": "1.0.0",
+  "description": "Priya — personal AI technology expert. React/Vite frontend + Express backend (Gemini API proxy).",
+  "private": true,
+  "type": "commonjs",
+  "workspaces": [
+    "client"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace client",
+    "start": "node server/index.js",
+    "dev": "concurrently -k -n server,client \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node server/index.js",
+    "dev:client": "npm run dev --workspace client"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

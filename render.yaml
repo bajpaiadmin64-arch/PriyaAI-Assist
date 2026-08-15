@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: priya-ai-assist
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+        # Set this secret in the Render dashboard (Environment -> Secrets).
+      - key: NODE_ENV
+        value: production
