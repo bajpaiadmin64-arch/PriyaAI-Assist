@@ -1,11 +1,16 @@
 import React from 'react';
 import { speechSupported, createRecognizer } from '../voice.js';
 
-export default function Composer({ onSend, disabled, voiceLang }) {
+export default function Composer({ onSend, disabled, voiceLang, onListeningChange }) {
   const [text, setText] = React.useState('');
   const [listening, setListening] = React.useState(false);
   const inputRef = React.useRef(null);
   const recognizerRef = React.useRef(null);
+
+  const setListeningBoth = (v) => {
+    setListening(v);
+    onListeningChange && onListeningChange(v);
+  };
 
   const autosize = () => {
     const ta = inputRef.current;
@@ -39,9 +44,9 @@ export default function Composer({ onSend, disabled, voiceLang }) {
           setText(t);
           requestAnimationFrame(autosize);
         },
-        onEnd: () => setListening(false),
+        onEnd: () => setListeningBoth(false),
         onError: (e) => {
-          setListening(false);
+          setListeningBoth(false);
           if (e === 'not-allowed') toast('Microphone access denied. Allow mic in browser settings.');
           else if (e !== 'aborted') toast('Voice error: ' + e);
         }
@@ -52,7 +57,7 @@ export default function Composer({ onSend, disabled, voiceLang }) {
       ? (navigator.language && /^(hi|en)/i.test(navigator.language) ? navigator.language : 'en-IN')
       : voiceLang;
     recognizerRef.current.start(lang);
-    setListening(true);
+    setListeningBoth(true);
   };
 
   return (

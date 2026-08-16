@@ -1,5 +1,5 @@
 import React from 'react';
-import Avatar from './Avatar.jsx';
+import PriyaOrb from './PriyaOrb.jsx';
 import Markdown from '../markdown.jsx';
 import { speak, isSpeaking, stopSpeaking } from '../voice.js';
 
@@ -48,8 +48,8 @@ export default function Message({ msg }) {
   };
 
   return (
-    <div className={`msg ${isUser ? 'user' : 'priya'}`}>
-      {!isUser && <Avatar size="sm" />}
+    <div className={`msg ${isUser ? 'user' : 'priya'} msg-enter`}>
+      {!isUser && <PriyaOrb size="sm" state="idle" />}
       <div className="msg-main">
         <div className={`msg-bubble ${isUser ? '' : 'priya-bubble'}`}>
           {isUser ? msg.content : <Markdown text={msg.content} />}
