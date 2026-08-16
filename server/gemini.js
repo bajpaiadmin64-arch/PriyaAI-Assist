@@ -1,7 +1,7 @@
 'use strict';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_MODEL = 'gemini-3.6-flash';
+const DEFAULT_MODEL = 'gemini-3.5-flash';
 
 function getModel() {
   return (process.env.GEMINI_MODEL || DEFAULT_MODEL).trim();

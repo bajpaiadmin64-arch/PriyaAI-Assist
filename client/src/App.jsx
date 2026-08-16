@@ -9,7 +9,7 @@ import { detectLang } from './lang.js';
 import { speak, stopSpeaking, isSpeaking } from './voice.js';
 
 const DEFAULT_SETTINGS = {
-  model: 'gemini-3.6-flash',
+  model: 'sarvam-105b',
   temp: 0.7,
   voiceLang: 'auto',
   voiceOut: true,
@@ -87,7 +87,7 @@ export default function App() {
       try {
         const h = await fetchHealth();
         setBackend({ ok: true, model: h.model, configured: h.configured });
-        setStatus({ state: 'ready', label: h.configured ? 'Online' : 'No API key' });
+        setStatus({ state: 'ready', label: h.configured ? 'Online' : 'AI offline' });
       } catch (e) {
         setBackend({ ok: false });
         setStatus({ state: 'off', label: 'Backend offline' });

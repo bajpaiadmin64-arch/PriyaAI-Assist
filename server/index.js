@@ -5,6 +5,7 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const { chatGemini, getModel, hasKey } = require('./gemini');
+const { chatSarvam, hasKey: hasSarvamKey, getModel: getSarvamModel } = require('./sarvam-llm');
 const { webSearch } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
 const { synthesize, ttsStatus, SARVAM_VOICES } = require('./tts');
@@ -24,9 +25,22 @@ app.use((req, _res, next) => {
   next();
 });
 
+// Active chat provider: Gemini if its key is set, otherwise Sarvam AI (both can coexist; Gemini wins).
+function activeProvider() {
+  if (hasKey()) return { name: 'gemini', model: getModel() };
+  if (hasSarvamKey()) return { name: 'sarvam', model: getSarvamModel() };
+  return { name: 'none', model: null };
+}
+
 /* ---------- Health ---------- */
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', model: getModel(), configured: hasKey() });
+  const provider = activeProvider();
+  res.json({
+    status: 'ok',
+    model: provider.model,
+    configured: provider.name !== 'none',
+    provider: provider.name
+  });
 });
 
 /* ---------- Chat ---------- */
@@ -73,9 +87,20 @@ app.post('/api/chat', async (req, res, next) => {
     const system = buildSystemPrompt({ mode, lang, searchContext });
     const messages = [...cleanHistory.map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
 
-    const { text } = await chatGemini({ system, messages, temperature: 0.7 });
+    const provider = activeProvider();
+    if (provider.name === 'none') {
+      const err = new Error('No AI service configured on the server.');
+      err.status = 503;
+      err.code = 'MISSING_KEY';
+      throw err;
+    }
 
-    res.json({ reply: text, sources, searched });
+    const { text } =
+      provider.name === 'gemini'
+        ? await chatGemini({ system, messages, temperature: 0.7 })
+        : await chatSarvam({ system, messages, temperature: 0.7 });
+
+    res.json({ reply: text, sources, searched, provider: provider.name, model: provider.model });
   } catch (e) {
     next(e);
   }
@@ -151,7 +176,7 @@ if (process.env.NODE_ENV === 'production' || require('fs').existsSync(path.join(
 app.use((err, _req, res, _next) => {
   console.error('api error:', err.message);
   if (err.status === 503 && err.code === 'MISSING_KEY') {
-    return res.status(503).json({ error: 'AI service is not configured yet. Please set the GEMINI_API_KEY on the server.' });
+    return res.status(503).json({ error: 'AI service is not configured yet. Please set the GEMINI_API_KEY or SARVAM_API_KEY on the server.' });
   }
   const status = typeof err.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
   res.status(status).json({
@@ -161,6 +186,7 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Priya AI backend running on http://localhost:${PORT}`);
-  console.log(`Model: ${getModel()}`);
-  console.log(`Gemini key configured: ${hasKey()}`);
+  const provider = activeProvider();
+  console.log(`Chat provider: ${provider.name} (${provider.model || 'none'})`);
+  console.log(`Gemini key configured: ${hasKey()} | Sarvam key configured: ${hasSarvamKey()}`);
 });

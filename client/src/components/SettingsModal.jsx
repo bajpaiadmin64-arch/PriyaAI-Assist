@@ -1,6 +1,6 @@
 import React from 'react';
 
-const MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
+const MODELS = ['sarvam-105b', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
 
 export default function SettingsModal({ open, settings, onChange, onClose }) {
   const [voicesInfo, setVoicesInfo] = React.useState(null);
@@ -41,7 +41,7 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
 
         <div className="modal-body">
           <div className="field">
-            <label htmlFor="model">Gemini model</label>
+            <label htmlFor="model">AI model</label>
             <input id="model" type="text" value={settings.model} onChange={(e) => set({ model: e.target.value })} />
             <div className="model-presets">
               {MODELS.map((m) => (
@@ -55,7 +55,7 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
                 </button>
               ))}
             </div>
-            <p className="field-hint">Default: current free-tier Flash model. The server falls back to the default if this is empty.</p>
+            <p className="field-hint">Sarvam-105B (Indian languages) is used when no Gemini key is set. The server picks the best available model.</p>
           </div>
 
           <div className="field">

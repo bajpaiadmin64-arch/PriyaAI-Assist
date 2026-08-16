@@ -7,7 +7,7 @@ export async function fetchHealth() {
 }
 
 /**
- * Send a chat message to the backend (which talks to Gemini).
+ * Send a chat message to the backend (which talks to the configured AI provider).
  * @param {object} p
  * @param {string} p.message
  * @param {Array<{role:string,content:string}>} p.history
