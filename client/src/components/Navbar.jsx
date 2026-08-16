@@ -23,6 +23,7 @@ export default function Navbar({ onNav, onStartChat, themeDark, onToggleTheme, s
         <button className="nav-brand" type="button" onClick={() => go('home')} aria-label="Priya AI home">
           <PriyaOrb size="sm" state="idle" />
           <span className="nav-brand-name">Priya <em>AI</em></span>
+          <span className="nav-credit">Designed &amp; developed by Utkarsh Bajpai</span>
         </button>
 
         <nav className="nav-links" aria-label="Main navigation">

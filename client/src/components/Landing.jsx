@@ -182,6 +182,7 @@ export default function Landing({ onStartChat, statusLabel, orbState }) {
         <div className="footer-inner">
           <span className="nav-brand-name">Priya <em>AI</em></span>
           <p>Personal AI technology expert · Hindi · English · Hinglish</p>
+          <p className="footer-credit">Designed &amp; developed by Utkarsh Bajpai · <a href="tel:+91770692484">+91 77069 24984</a></p>
           <p className="footer-note">© {new Date().getFullYear()} Priya AI — v2.0</p>
         </div>
       </footer>
