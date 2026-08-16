@@ -13,6 +13,9 @@ const DEFAULT_SETTINGS = {
   temp: 0.7,
   voiceLang: 'auto',
   voiceOut: true,
+  autoSpeak: true,
+  speed: 'normal',
+  voice: 'priya',
   webSearch: true,
   theme: 'auto',
   mode: 'balanced'
@@ -169,7 +172,9 @@ export default function App() {
       };
       setMessages((prev) => [...prev, priyaMsg]);
       setStatus({ state: 'ready', label: res.searched ? 'Web search done' : 'Online' });
-      if (settings.voiceOut) speak(res.reply, lang);
+      if (settings.voiceOut && settings.autoSpeak) {
+        speak(res.reply, lang, { speed: settings.speed, voice: settings.voice });
+      }
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -225,7 +230,7 @@ export default function App() {
   const handleSpeakNow = () => {
     if (isSpeaking()) { stopSpeaking(); return; }
     const lastPriya = [...messages].reverse().find((m) => m.role === 'assistant' && !m.error);
-    if (lastPriya) speak(lastPriya.content, lastPriya.lang);
+    if (lastPriya) speak(lastPriya.content, lastPriya.lang, { speed: settings.speed, voice: settings.voice });
   };
 
   const startChat = () => {

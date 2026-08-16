@@ -20,7 +20,7 @@ async function copyText(text) {
   }
 }
 
-export default function Message({ msg }) {
+export default function Message({ msg, speed = 'normal', voice = 'priya' }) {
   const isUser = msg.role === 'user';
   const [speakingState, setSpeakingState] = React.useState(false);
 
@@ -38,7 +38,7 @@ export default function Message({ msg }) {
     if (isSpeaking()) {
       stopSpeaking();
     } else {
-      speak(msg.content, msg.lang);
+      speak(msg.content, msg.lang, { speed, voice });
     }
   };
 

@@ -1,10 +1,23 @@
-/* Voice helpers — browser-native Web Speech APIs only. */
+/* Voice engine — Priya natural Indian voice.
+ * Primary:   backend /api/tts (Sarvam AI Bulbul v3, ElevenLabs fallback)
+ * Fallback:  browser speech synthesis (hi-IN / en-IN voices)
+ */
+
+import { prepareForSpeech } from './tts-normalize.js';
 
 let voicesCache = [];
 let recognition = null;
 
+let audioEl = null;
+let backendUnavailableUntil = 0; // retry cooldown after a "no provider" response
+let browserQueue = [];
+let browserPlaying = false;
+
+const SPEED_RATE = { slow: 0.9, normal: 1.0, fast: 1.15 };
+const SPEED_BACKEND = { slow: 0.85, normal: 1.0, fast: 1.25 };
+
 export function voiceSupported() {
-  return 'speechSynthesis' in window;
+  return typeof window !== 'undefined' && 'speechSynthesis' in window;
 }
 
 export function speechSupported() {
@@ -31,41 +44,161 @@ function pickVoice(lang) {
   return voicesCache[0] || null;
 }
 
-function stripMarkdown(s) {
-  return s
-    .replace(/```[\w-]*\n?[\s\S]*?```/g, ' ')
-    .replace(/`([^`]*)`/g, '$1')
-    .replace(/[*_#>|]/g, ' ')
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim();
+function getAudio() {
+  if (!audioEl) {
+    audioEl = new Audio();
+    audioEl.preload = 'auto';
+  }
+  return audioEl;
 }
 
-export function speak(text, lang) {
-  if (!voiceSupported()) return false;
-  const clean = stripMarkdown(text).slice(0, 2200);
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(clean);
-  const v = pickVoice(lang || 'en');
+/* ---------- Backend (premium) voice ---------- */
+
+async function speakBackend(text, lang, speed, voice) {
+  const res = await fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      lang: lang === 'hi' ? 'hi' : 'en',
+      speed: speed || 'normal',
+      voice: voice || undefined
+    })
+  });
+
+  if (res.ok) {
+    const blob = await res.blob();
+    const a = getAudio();
+    if (a.src) URL.revokeObjectURL(a.src);
+    a.src = URL.createObjectURL(blob);
+    await a.play();
+    return { ok: true, provider: res.headers.get('X-TTS-Provider') || 'backend', prepared: null };
+  }
+
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* non-json */ }
+
+  if (body && body.fallback) {
+    backendUnavailableUntil = Date.now() + 5 * 60 * 1000; // don't hammer a keyless server
+    return { ok: false, fallback: true, prepared: body.preparedText || null };
+  }
+  throw new Error('Voice service error ' + res.status);
+}
+
+/* ---------- Browser fallback voice ---------- */
+
+function browserSpeakNext() {
+  if (browserPlaying || !browserQueue.length) return;
+  browserPlaying = true;
+  const { text, lang, rate, voice } = browserQueue.shift();
+
+  const u = new SpeechSynthesisUtterance(text);
+  const v = voice || pickVoice(lang || 'en');
   if (v) u.voice = v;
   u.lang = v && v.lang ? v.lang : lang === 'hi' ? 'hi-IN' : 'en-IN';
-  u.rate = 1.0;
-  u.pitch = 1.05;
+  u.rate = rate;
+  u.pitch = 1.02;
+  u.onend = () => {
+    browserPlaying = false;
+    browserSpeakNext();
+  };
+  u.onerror = () => {
+    browserPlaying = false;
+    browserSpeakNext();
+  };
   speechSynthesis.speak(u);
+}
+
+function browserSpeak(text, lang, speed) {
+  if (!voiceSupported()) return false;
+  const clean = text.slice(0, 3000);
+  const rate = SPEED_RATE[speed] || 1.0;
+  const v = pickVoice(lang || 'en');
+
+  speechSynthesis.cancel();
+  browserPlaying = false;
+
+  // chunk by sentences so long replies never get cut off
+  const sentences = clean.match(/[^.!?।]+[.!?।]?/g) || [clean];
+  let chunk = '';
+  for (const s of sentences) {
+    if ((chunk + s).length > 180 && chunk) {
+      browserQueue.push({ text: chunk.trim(), lang, rate, voice: v });
+      chunk = s;
+    } else {
+      chunk += s;
+    }
+  }
+  if (chunk.trim()) browserQueue.push({ text: chunk.trim(), lang, rate, voice: v });
+  browserSpeakNext();
   return true;
 }
 
+/* ---------- Public API ---------- */
+
+/**
+ * Speak a Priya reply with the best available voice.
+ * @param {string} rawText markdown reply
+ * @param {'hi'|'en'} lang
+ * @param {{speed?: 'slow'|'normal'|'fast'}} opts
+ * @returns {Promise<boolean>} started
+ */
+export async function speak(rawText, lang, opts = {}) {
+  stopSpeaking();
+
+  const { text } = prepareForSpeech(rawText, { lang });
+
+  // 1) Premium backend voice (Sarvam AI -> ElevenLabs on the server)
+  if (Date.now() >= backendUnavailableUntil) {
+    try {
+      const r = await speakBackend(text, lang, opts.speed, opts.voice);
+      return r.ok;
+    } catch (e) {
+      // network/server error — fall through to browser voice
+    }
+  }
+
+  // 2) Browser native voice (hi-IN / en-IN)
+  return browserSpeak(text, lang, opts.speed);
+}
+
 export function stopSpeaking() {
+  if (audioEl) {
+    audioEl.pause();
+    audioEl.currentTime = 0;
+  }
   if (voiceSupported()) speechSynthesis.cancel();
+  browserQueue = [];
+  browserPlaying = false;
+}
+
+export function pauseSpeaking() {
+  if (audioEl && !audioEl.paused && !audioEl.ended) audioEl.pause();
+  else if (voiceSupported()) speechSynthesis.pause();
+}
+
+export function resumeSpeaking() {
+  if (audioEl && audioEl.paused && audioEl.src && !audioEl.ended) audioEl.play();
+  else if (voiceSupported()) speechSynthesis.resume();
 }
 
 export function isSpeaking() {
+  if (audioEl && audioEl.src && !audioEl.ended) return !audioEl.paused;
   return voiceSupported() && speechSynthesis.speaking;
+}
+
+export function isPaused() {
+  if (audioEl && audioEl.src && !audioEl.ended) return audioEl.paused;
+  return voiceSupported() && speechSynthesis.paused;
+}
+
+export function pickSTTLang(lastLang) {
+  return lastLang === 'hi' ? 'hi-IN' : 'en-IN';
 }
 
 /**
  * Create a speech recognizer bound to callbacks.
- * @returns {object|null} {start(lang), stop(), setListeners}
+ * @returns {object|null} {start(lang), stop(), on(cb)}
  */
 export function createRecognizer() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;

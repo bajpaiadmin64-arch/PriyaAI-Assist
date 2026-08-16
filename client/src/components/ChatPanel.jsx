@@ -2,6 +2,7 @@ import React from 'react';
 import PriyaOrb from './PriyaOrb.jsx';
 import Message from './Message.jsx';
 import Composer from './Composer.jsx';
+import { pauseSpeaking, resumeSpeaking, isPaused, stopSpeaking } from '../voice.js';
 
 const SUGGESTIONS = [
   { q: 'Meri website deploy nahi ho rahi, error aa raha hai. Kaise fix karun?', label: '🛠️ Deploy issue' },
@@ -19,10 +20,23 @@ export default function ChatPanel({
 }) {
   const chatEndRef = React.useRef(null);
   const bodyRef = React.useRef(null);
+  const [paused, setPaused] = React.useState(false);
 
   React.useEffect(() => {
     chatEndRef.current && chatEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, typing]);
+
+  const togglePause = () => {
+    if (isPaused()) { resumeSpeaking(); setPaused(false); }
+    else { pauseSpeaking(); setPaused(true); }
+  };
+
+  const lastUserLang = React.useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') return messages[i].lang;
+    }
+    return null;
+  }, [messages]);
 
   return (
     <div className="chat-view">
@@ -59,6 +73,16 @@ export default function ChatPanel({
             <button className={`icon-btn ${settings.voiceOut ? 'active' : ''}`} onClick={onToggleVoiceOut} title="Voice replies: on/off" type="button">
               <svg viewBox="0 0 24 24" className="ic"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z" /></svg>
             </button>
+            <button className={`icon-btn ${paused ? 'active' : ''}`} onClick={togglePause} title={paused ? 'Resume' : 'Pause'} type="button">
+              {paused ? (
+                <svg viewBox="0 0 24 24" className="ic"><path d="M8 5v14l11-7z" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" className="ic"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+              )}
+            </button>
+            <button className="icon-btn" onClick={stopSpeaking} title="Stop speaking" type="button">
+              <svg viewBox="0 0 24 24" className="ic"><path d="M6 6h12v12H6z" /></svg>
+            </button>
             <button className="icon-btn" onClick={onSpeakLast} title="Play / stop last reply" type="button">
               <svg viewBox="0 0 24 24" className="ic"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" /></svg>
             </button>
@@ -94,7 +118,7 @@ export default function ChatPanel({
           )}
 
           {messages.map((m, i) => (
-            <Message key={i} msg={m} />
+            <Message key={i} msg={m} speed={settings.speed} voice={settings.voice} />
           ))}
 
           {typing && (
@@ -113,6 +137,7 @@ export default function ChatPanel({
           onSend={onSend}
           disabled={typing}
           voiceLang={voiceLang}
+          conversationLang={lastUserLang}
           onListeningChange={onListeningChange}
         />
       </main>

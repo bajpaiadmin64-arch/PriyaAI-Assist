@@ -3,9 +3,31 @@ import React from 'react';
 const MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
 
 export default function SettingsModal({ open, settings, onChange, onClose }) {
+  const [voicesInfo, setVoicesInfo] = React.useState(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/tts/voices');
+        if (!res.ok) throw new Error('no voices');
+        const data = await res.json();
+        if (alive) setVoicesInfo(data);
+      } catch (e) {
+        if (alive) setVoicesInfo(null);
+      }
+    })();
+    return () => { alive = false; };
+  }, [open]);
+
   if (!open) return null;
 
   const set = (patch) => onChange({ ...settings, ...patch });
+
+  const sarvamOn = !!(voicesInfo && voicesInfo.providers && voicesInfo.providers.sarvam && voicesInfo.providers.sarvam.configured);
+  const elevenOn = !!(voicesInfo && voicesInfo.providers && voicesInfo.providers.elevenlabs && voicesInfo.providers.elevenlabs.configured);
+  const voices = (voicesInfo && voicesInfo.voices) || [];
 
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -42,6 +64,78 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
               onChange={(e) => set({ temp: parseFloat(e.target.value) })} />
           </div>
 
+          {/* ------- Voice ------- */}
+          <div className="field voice-field">
+            <label>Voice — speed</label>
+            <div className="segmented">
+              {[
+                { v: 'slow', label: '🐢 Slow' },
+                { v: 'normal', label: '▶️ Normal' },
+                { v: 'fast', label: '🚀 Fast' }
+              ].map((o) => (
+                <button key={o.v} type="button"
+                  className={`seg-btn ${settings.speed === o.v ? 'active' : ''}`}
+                  onClick={() => set({ speed: o.v })}>
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            <p className="field-hint">Priya ki speaking speed (voice input aur replies dono pe lagta hai).</p>
+          </div>
+
+          <div className="field">
+            <label htmlFor="voice-select">Voice</label>
+            <select id="voice-select" className="voice-select" value={settings.voice}
+              onChange={(e) => set({ voice: e.target.value })}>
+              {voices.length ? (
+                voices.map((v) => (
+                  <option key={v.id} value={v.id}>{v.name} — {v.note}</option>
+                ))
+              ) : (
+                <option value={settings.voice}>Priya (default)</option>
+              )}
+            </select>
+            <p className="field-hint">
+              {sarvamOn
+                ? 'Sarvam AI natural Indian voices — priya is the best-quality female voice.'
+                : 'Set SARVAM_API_KEY on the server to unlock premium natural Indian voices. Until then the browser voice is used.'}
+            </p>
+          </div>
+
+          <div className="field">
+            <div className="toggle-row">
+              <div>
+                <strong>Auto speak</strong>
+                <p className="field-hint">Har jawab automatically bole. Band karne par sirf speaker button se bolegi.</p>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={settings.autoSpeak} onChange={(e) => set({ autoSpeak: e.target.checked })} />
+                <span className="slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="toggle-row">
+              <div>
+                <strong>Voice replies</strong>
+                <p className="field-hint">Priya bolkar jawab de (mute/unmute).</p>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={settings.voiceOut} onChange={(e) => set({ voiceOut: e.target.checked })} />
+                <span className="slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="voice-status">
+            <span className={`vs-dot ${sarvamOn ? 'on' : ''}`} />
+            Sarvam AI (native Hindi) {sarvamOn ? 'connected' : 'not configured'}
+            <br />
+            <span className={`vs-dot ${elevenOn ? 'on' : ''}`} />
+            ElevenLabs (fallback) {elevenOn ? 'connected' : 'not configured'}
+          </div>
+
           <div className="field">
             <label>Voice input language</label>
             <div className="segmented">
@@ -57,19 +151,7 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="field">
-            <div className="toggle-row">
-              <div>
-                <strong>Voice replies</strong>
-                <p className="field-hint">Priya bolkar jawab de (text-to-speech).</p>
-              </div>
-              <label className="switch">
-                <input type="checkbox" checked={settings.voiceOut} onChange={(e) => set({ voiceOut: e.target.checked })} />
-                <span className="slider" />
-              </label>
-            </div>
+            <p className="field-hint">Auto = conversation ki bhasha ke hisaab se (Hindi → hi-IN, English → en-IN).</p>
           </div>
 
           <div className="field">

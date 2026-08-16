@@ -7,6 +7,7 @@ const express = require('express');
 const { chatGemini, getModel, hasKey } = require('./gemini');
 const { webSearch } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
+const { synthesize, ttsStatus, SARVAM_VOICES } = require('./tts');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -90,6 +91,49 @@ app.post('/api/search', async (req, res, next) => {
     const results = await webSearch(q.trim(), 5);
     res.json({ results });
   } catch (e) {
+    next(e);
+  }
+});
+
+/* ---------- Text-to-speech (voice engine) ---------- */
+app.get('/api/tts/voices', (_req, res) => {
+  res.json({
+    defaultVoice: ttsStatus().defaultVoice,
+    speedOptions: ['slow', 'normal', 'fast'],
+    providers: ttsStatus().providers,
+    voices: SARVAM_VOICES
+  });
+});
+
+app.post('/api/tts', async (req, res, next) => {
+  try {
+    const { text, lang, speed, voice } = req.body || {};
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'Text is required.' });
+    }
+    if (text.length > 20000) {
+      return res.status(400).json({ error: 'Text is too long (max 20000 characters).' });
+    }
+    const result = await synthesize(text, {
+      lang: lang === 'hi' ? 'hi' : 'en',
+      speed: speed || 'normal',
+      voice: voice || undefined
+    });
+    res.setHeader('Content-Type', result.mime);
+    res.setHeader('X-TTS-Provider', result.provider);
+    res.setHeader('X-TTS-Speed', result.speed);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(result.audio);
+  } catch (e) {
+    if (e.fallback) {
+      // Graceful degradation: tell the client to use browser speech synthesis.
+      return res.status(503).json({
+        error: 'Voice service unavailable, using browser voice.',
+        fallback: true,
+        providerErrors: e.providerErrors || [],
+        preparedText: e.preparedText
+      });
+    }
     next(e);
   }
 });

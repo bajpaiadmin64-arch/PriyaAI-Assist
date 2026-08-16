@@ -10,5 +10,11 @@ services:
       - key: GEMINI_API_KEY
         sync: false
         # Set this secret in the Render dashboard (Environment -> Secrets).
+      - key: SARVAM_API_KEY
+        sync: false
+        # Optional: natural Hindi / Hinglish voices (https://dashboard.sarvam.ai).
+      - key: ELEVENLABS_API_KEY
+        sync: false
+        # Optional fallback voice provider (https://elevenlabs.io).
       - key: NODE_ENV
         value: production

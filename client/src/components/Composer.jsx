@@ -1,7 +1,7 @@
 import React from 'react';
-import { speechSupported, createRecognizer } from '../voice.js';
+import { speechSupported, createRecognizer, pickSTTLang } from '../voice.js';
 
-export default function Composer({ onSend, disabled, voiceLang, onListeningChange }) {
+export default function Composer({ onSend, disabled, voiceLang, conversationLang, onListeningChange }) {
   const [text, setText] = React.useState('');
   const [listening, setListening] = React.useState(false);
   const inputRef = React.useRef(null);
@@ -54,7 +54,9 @@ export default function Composer({ onSend, disabled, voiceLang, onListeningChang
       recognizerRef.current = r;
     }
     const lang = voiceLang === 'auto'
-      ? (navigator.language && /^(hi|en)/i.test(navigator.language) ? navigator.language : 'en-IN')
+      ? (conversationLang
+          ? pickSTTLang(conversationLang)
+          : (navigator.language && /^(hi|en)/i.test(navigator.language) ? navigator.language : 'en-IN'))
       : voiceLang;
     recognizerRef.current.start(lang);
     setListeningBoth(true);
