@@ -24,8 +24,6 @@ export default function ChatPanel({
     chatEndRef.current && chatEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, typing]);
 
-  const listening = status.state === 'busy' && status.label === 'Listening…';
-
   return (
     <div className="chat-view">
       <div className="chat-bg" aria-hidden="true">
@@ -63,6 +61,9 @@ export default function ChatPanel({
             </button>
             <button className="icon-btn" onClick={onSpeakLast} title="Play / stop last reply" type="button">
               <svg viewBox="0 0 24 24" className="ic"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" /></svg>
+            </button>
+            <button className="icon-btn" onClick={onExport} title="Export chat as markdown" type="button">
+              <svg viewBox="0 0 24 24" className="ic"><path d="M19 19H5V5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.6l-9.8 9.8 1.4 1.4L19 6.4V10h2V3h-7z" /></svg>
             </button>
             <button className="icon-btn" onClick={onClear} title="Clear conversation" type="button">
               <svg viewBox="0 0 24 24" className="ic"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" /></svg>
