@@ -1388,6 +1388,29 @@ a { color: var(--primary); text-decoration: none; }
 }
 
 /* ============================================================
+   FATAL ERROR SCREEN (error boundary)
+   ============================================================ */
+.fatal-screen {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  background: var(--bg, #0c0e18);
+  z-index: 9999;
+}
+.fatal-card {
+  max-width: 440px;
+  padding: 40px 32px;
+  border-radius: 24px;
+  text-align: center;
+  background: var(--surface, #141729);
+  border: 1px solid var(--border, #262b45);
+  box-shadow: var(--shadow-lg, 0 24px 60px rgba(0, 0, 0, 0.4));
+}
+.fatal-card h1 { margin: 0 0 10px; font-size: 22px; color: var(--text, #eef0ff); }
+.fatal-card p { margin: 0 0 22px; font-size: 14.5px; line-height: 1.55; color: var(--muted, #a7a8c3); }
+.fatal-actions { display: flex; gap: 10px; justify-content: center; }
+
+/* ============================================================
    REDUCED MOTION
    ============================================================ */
 @media (prefers-reduced-motion: reduce) {

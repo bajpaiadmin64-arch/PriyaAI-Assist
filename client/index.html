@@ -10,9 +10,37 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    .boot-screen {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 18px;
+      background: #0c0e18;
+      font-family: 'Inter', system-ui, sans-serif;
+      z-index: 9999;
+    }
+    .boot-orb {
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #fff 0%, #c9bfff 22%, #8b7bff 55%, #4c3dd6 100%);
+      box-shadow: 0 0 40px rgba(124, 92, 255, 0.55), 0 0 90px rgba(124, 92, 255, 0.25);
+      animation: bootPulse 1.4s ease-in-out infinite;
+    }
+    .boot-text { color: #b8b2d9; font-size: 15px; letter-spacing: 0.4px; margin: 0; }
+    @keyframes bootPulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.12); opacity: 0.85; }
+    }
+  </style>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <div class="boot-screen">
+      <div class="boot-orb" aria-hidden="true"></div>
+      <p class="boot-text">Loading Priya AI...</p>
+      <noscript><p class="boot-text">Priya AI needs JavaScript. Please enable it and refresh.</p></noscript>
+    </div>
+  </div>
   <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>
