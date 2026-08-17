@@ -130,9 +130,6 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // keep the latest send() available to the barge-in recognizer callbacks
-  sendRef.current = send;
-
   // Barge-in: while Priya is speaking, listen. If the user starts talking,
   // stop her instantly, wait for the full sentence, then answer it.
   React.useEffect(() => {
@@ -251,6 +248,11 @@ export default function App() {
       setTyping(false);
     }
   };
+
+  // keep the latest send() available to the barge-in recognizer callbacks
+  React.useEffect(() => {
+    sendRef.current = send;
+  });
 
   const clearChat = () => {
     if (messages.length && !window.confirm('Clear the whole conversation?')) return;
