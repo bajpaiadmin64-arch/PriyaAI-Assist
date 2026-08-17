@@ -6,9 +6,16 @@ const path = require('path');
 const express = require('express');
 const { chatGemini, getModel, hasKey } = require('./gemini');
 const { chatSarvam, hasKey: hasSarvamKey, getModel: getSarvamModel } = require('./sarvam-llm');
-const { webSearch } = require('./search');
+const { webSearch, fetchPage } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
+const { calc } = require('./calc');
 const { synthesize, ttsStatus, SARVAM_VOICES } = require('./tts');
+
+// Provider fallback order (configurable). Gemini is skipped when no key is set.
+const PROVIDER_ORDER = (process.env.CHAT_PROVIDERS || 'gemini,sarvam')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -39,11 +46,28 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     model: provider.model,
     configured: provider.name !== 'none',
-    provider: provider.name
+    provider: provider.name,
+    providers: PROVIDER_ORDER
   });
 });
 
 /* ---------- Chat ---------- */
+// Live-search trigger words ("current information" questions)
+const SEARCH_RE =
+  /(latest|current|today|now|this year|news|headlines|version|release|pricing|price|cost|free tier|free tier|supported|documentation|docs|api|error|bug|fix|update|download|install|how to|what is|compare|difference|guide|tutorial|2024|2025|2026)/i;
+
+// "create a report/file" intent → produces a downloadable file
+const DOWNLOAD_RE =
+  /(create|make|generate|save|download|write|banao|bana de|create karo|download karo|bana do).{0,40}(report|file|document|summary|notes?|guide|list)/i;
+
+function isPureMath(s) {
+  return (
+    /[0-9]/.test(s) &&
+    /[+\-*/%^×÷]/.test(s) &&
+    /^[\d\s.()+\-*/%^×÷]+$/.test(s)
+  );
+}
+
 app.post('/api/chat', async (req, res, next) => {
   try {
     const { message, history, mode, useWebSearch, lang } = req.body || {};
@@ -62,45 +86,143 @@ app.post('/api/chat', async (req, res, next) => {
           .slice(-30)
       : [];
 
-    // Optional live web search for "current information" queries
-    let sources = [];
-    let searched = false;
-    let searchContext = '';
+    /* ---------- Tool routing ---------- */
+    let toolResult = null; // { text } direct answer (no LLM needed)
 
-    const wantsSearch = !!(useWebSearch) && /(latest|current|today|now|new version|pricing|price|cost|supported|release|update|news|2024|2025|2026|how to|tutorial|documentation|docs|error|bug|fix|download|install)/i.test(cleanMessage);
+    // !calc <expr>
+    let calcMatch = cleanMessage.match(/^!calc\s+([\s\S]+)$/i);
+    if (!calcMatch && isPureMath(cleanMessage)) calcMatch = ['', cleanMessage];
 
-    if (wantsSearch) {
-      try {
-        sources = await webSearch(cleanMessage, 5);
-        searched = sources.length > 0;
-        if (searched) {
-          searchContext = sources
-            .map((s, i) => `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${s.snippet || ''}`)
-            .join('\n');
-        }
-      } catch (e) {
-        console.error('search failed:', e.message);
-        sources = [];
+    if (calcMatch) {
+      const r = calc(calcMatch[1]);
+      if (r.ok) {
+        toolResult = { text: `🧮 ${r.expr} = **${r.value}**` };
+      } else {
+        toolResult = { text: 'That expression is not a valid math expression. Try e.g. `!calc (1245*87) + 2^10`.' };
       }
     }
 
-    const system = buildSystemPrompt({ mode, lang, searchContext });
-    const messages = [...cleanHistory.map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
+    // !open <url> → read a public page
+    const openMatch = cleanMessage.match(/^!open\s+(\S+)$/i);
+    if (!toolResult && openMatch) {
+      const page = await fetchPage(openMatch[1]);
+      toolResult = {
+        text: `I read the page "${page.title}" (${page.url}) — summary below.`,
+        context: `PAGE CONTENT (fetched just now from ${page.url}):\n${page.text}`
+      };
+    }
 
-    const provider = activeProvider();
-    if (provider.name === 'none') {
+    /* ---------- Optional live web search ---------- */
+    let sources = [];
+    let searched = false;
+    let searchStatus = 'none';
+    let searchContext = '';
+
+    const explicitSearch = cleanMessage.match(/^!search\s+([\s\S]+)$/i);
+    const wantsSearch = !!explicitSearch || (!!useWebSearch && SEARCH_RE.test(cleanMessage));
+
+    if (!toolResult && wantsSearch) {
+      const q = explicitSearch ? explicitSearch[1] : cleanMessage;
+      try {
+        sources = await webSearch(q, 5);
+        searched = sources.length > 0;
+        if (searched) {
+          searchStatus = 'ok';
+          searchContext = sources
+            .map((s, i) => `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${s.snippet || ''}`)
+            .join('\n');
+        } else {
+          searchStatus = 'failed';
+        }
+      } catch (e) {
+        console.error('search failed:', e.message);
+        searchStatus = 'failed';
+      }
+    }
+
+    /* ---------- Direct tool answers (no LLM call) ---------- */
+    if (toolResult) {
+      return res.json({
+        reply: toolResult.text,
+        sources,
+        searched,
+        tool: true,
+        provider: 'tool',
+        model: null,
+        searchStatus
+      });
+    }
+
+    /* ---------- AI response with provider fallback ---------- */
+    const system = buildSystemPrompt({ mode, lang, searchContext, searchStatus });
+    const messages = [...cleanHistory.map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
+    if (toolResult && toolResult.context) messages.push({ role: 'user', content: toolResult.context });
+
+    const configured = PROVIDER_ORDER.filter(
+      (name) => (name === 'gemini' && hasKey()) || (name === 'sarvam' && hasSarvamKey())
+    );
+    if (configured.length === 0) {
       const err = new Error('No AI service configured on the server.');
       err.status = 503;
       err.code = 'MISSING_KEY';
       throw err;
     }
 
-    const { text } =
-      provider.name === 'gemini'
-        ? await chatGemini({ system, messages, temperature: 0.7 })
-        : await chatSarvam({ system, messages, temperature: 0.7 });
+    let reply = '';
+    let usedProvider = null;
+    let lastError = null;
 
-    res.json({ reply: text, sources, searched, provider: provider.name, model: provider.model });
+    for (const name of configured) {
+      const call = name === 'gemini' ? chatGemini : chatSarvam;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30000);
+        try {
+          const { text } = await call({ system, messages, temperature: 0.7, signal: controller.signal });
+          clearTimeout(timer);
+          reply = text;
+          usedProvider = name;
+          break;
+        } catch (e) {
+          clearTimeout(timer);
+          lastError = e;
+          // retry once on transient failures (rate limit / 5xx / network), else move to next provider
+          const transient = e.status === 429 || (e.status >= 500 && e.status <= 599) || e.status === 502;
+          if (attempt === 0 && transient) continue;
+          break;
+        }
+      }
+      if (reply) break;
+    }
+
+    if (!reply) {
+      const err = new Error(
+        lastError && lastError.message
+          ? lastError.message
+          : 'All AI services are temporarily unavailable. Please try again in a moment.'
+      );
+      err.status = lastError && lastError.status ? lastError.status : 503;
+      throw err;
+    }
+
+    /* ---------- Optional downloadable report ---------- */
+    let download = null;
+    if (!openMatch && DOWNLOAD_RE.test(cleanMessage)) {
+      download = {
+        filename: `priya-${new Date().toISOString().slice(0, 10)}.md`,
+        content: reply
+      };
+    }
+
+    res.json({
+      reply,
+      sources,
+      searched,
+      provider: usedProvider,
+      model: usedProvider === 'gemini' ? getModel() : getSarvamModel(),
+      searchStatus,
+      download
+    });
   } catch (e) {
     next(e);
   }

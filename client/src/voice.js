@@ -196,9 +196,69 @@ export function pickSTTLang(lastLang) {
   return lastLang === 'hi' ? 'hi-IN' : 'en-IN';
 }
 
+/* ---------- Barge-in / interruptible conversation ---------- */
+
+const STOP_WORDS_RE =
+  /^(ruko|ruk|rukja|ruko jao|wait|stop|bas|bas kar|chup|chup ho|ek minute|one minute|one moment|hold on|hold up|suno|sun|yeh nahi|nahi nahi|no no|wait wait|thoda ruko|pakdo|arey|are|woh nahi|woh mat karo)/i;
+
+/**
+ * Stop words the user can say to interrupt Priya ("Ruko", "Wait", "Stop", "Bas"...).
+ */
+export function isStopWord(t) {
+  const s = (t || '').trim().toLowerCase().replace(/[.!?,।]+$/g, '');
+  if (!s) return false;
+  if (s.length <= 2) return true; // "no", "na", "bas", "ruk"...
+  return STOP_WORDS_RE.test(s) || s === 'nahi' || s === 'no' || s === 'stop it';
+}
+
+let bargeInRec = null;
+
+/**
+ * Start a continuous listening session used while Priya is speaking.
+ * - First words spoken while she talks → onInterrupt (caller should stop her audio instantly).
+ * - Full sentence (end of speech / silence) → onFinal with the complete transcript.
+ * - Stop words ("Ruko", "Wait"...) → onStopWord (just stop her, do not answer).
+ */
+export function startBargeIn(lang, cb) {
+  if (bargeInRec) stopBargeIn();
+  const r = createRecognizer();
+  if (!r) return false;
+  let interrupted = false;
+  r.on({
+    onResult: (t, final) => {
+      if (final) {
+        stopBargeIn();
+        if (t && isStopWord(t)) {
+          cb.onStopWord && cb.onStopWord();
+          return;
+        }
+        if (t) cb.onFinal && cb.onFinal(t);
+        return;
+      }
+      if (!interrupted) {
+        interrupted = true;
+        cb.onInterrupt && cb.onInterrupt();
+      }
+    },
+    onEnd: () => cb.onEnd && cb.onEnd(),
+    onError: () => cb.onEnd && cb.onEnd()
+  });
+  r.start(lang || 'en-IN', { continuous: true });
+  bargeInRec = r;
+  return true;
+}
+
+export function stopBargeIn() {
+  if (bargeInRec) {
+    try { bargeInRec.stop(); } catch (e) { /* ignore */ }
+    bargeInRec = null;
+  }
+}
+
 /**
  * Create a speech recognizer bound to callbacks.
- * @returns {object|null} {start(lang), stop(), on(cb)}
+ * @returns {object|null} {start(lang, opts), stop(), on(cb)}
+ * cb.onResult(transcript, isFinal)
  */
 export function createRecognizer() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -208,8 +268,9 @@ export function createRecognizer() {
   recognition.continuous = false;
   recognition.maxAlternatives = 1;
   return {
-    start(lang) {
+    start(lang, opts) {
       recognition.lang = lang || 'en-IN';
+      recognition.continuous = !!(opts && opts.continuous);
       try {
         recognition.start();
       } catch (e) {
@@ -221,11 +282,14 @@ export function createRecognizer() {
     },
     on(cb) {
       recognition.onresult = (e) => {
-        let transcript = '';
+        let interim = '';
+        let finalText = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
-          transcript += e.results[i][0].transcript;
+          if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+          else interim += e.results[i][0].transcript;
         }
-        cb.onResult(transcript);
+        const transcript = (finalText + ' ' + interim).trim();
+        if (transcript) cb.onResult(transcript, finalText.length > 0);
       };
       recognition.onend = () => cb.onEnd && cb.onEnd();
       recognition.onerror = (e) => cb.onError && cb.onError(e.error);

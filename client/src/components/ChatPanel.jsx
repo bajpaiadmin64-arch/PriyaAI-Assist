@@ -16,7 +16,8 @@ const SUGGESTIONS = [
 export default function ChatPanel({
   messages, typing, status, backend, settings, orbState,
   onSend, onNewChat, onClear, onExport, onOpenSettings,
-  onToggleVoiceOut, onSpeakLast, onBack, voiceLang, onListeningChange
+  onToggleVoiceOut, onSpeakLast, onBack, voiceLang, onListeningChange,
+  thinkingLabel = 'Priya is thinking…'
 }) {
   const chatEndRef = React.useRef(null);
   const bodyRef = React.useRef(null);
@@ -125,7 +126,7 @@ export default function ChatPanel({
             <div className="msg priya thinking">
               <PriyaOrb size="sm" state="thinking" />
               <div className="msg-bubble priya-bubble thinking-bubble">
-                <span className="tb-label">Priya is thinking</span>
+                <span className="tb-label">{thinkingLabel}</span>
                 <span className="dots"><i /><i /><i /></span>
               </div>
             </div>

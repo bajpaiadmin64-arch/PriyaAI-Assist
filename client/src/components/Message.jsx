@@ -67,6 +67,14 @@ export default function Message({ msg, speed = 'normal', voice = 'priya' }) {
           </div>
         )}
 
+        {!isUser && msg.searched && <div className="info-updated">✓ Information updated</div>}
+        {!isUser && msg.provider && (
+          <div className="provider-chip">
+            ⚡ Priya is using {msg.provider === 'gemini' ? 'Gemini' : 'an alternate model'}
+            {msg.model ? ` (${msg.model})` : ''}
+          </div>
+        )}
+
         <div className="msg-meta">
           <span className="msg-time">{msg.time || timeStr()}</span>
           <div className="msg-actions">

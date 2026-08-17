@@ -157,6 +157,19 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
           <div className="field">
             <div className="toggle-row">
               <div>
+                <strong>Interrupt mode (barge-in)</strong>
+                <p className="field-hint">Priya bol rahi ho toh seedha bolkar roko — "Ruko!" bolte hi woh ruk jaayegi aur sunegi.</p>
+              </div>
+              <label className="switch">
+                <input type="checkbox" checked={settings.bargeIn} onChange={(e) => set({ bargeIn: e.target.checked })} />
+                <span className="slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="field">
+            <div className="toggle-row">
+              <div>
                 <strong>Auto web search</strong>
                 <p className="field-hint">Latest/current questions pe live web search kare.</p>
               </div>

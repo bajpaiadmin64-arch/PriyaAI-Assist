@@ -6,7 +6,7 @@ import SettingsModal from './components/SettingsModal.jsx';
 import { toast } from './components/Message.jsx';
 import { fetchHealth, sendChat } from './api.js';
 import { detectLang } from './lang.js';
-import { speak, stopSpeaking, isSpeaking } from './voice.js';
+import { speak, stopSpeaking, isSpeaking, startBargeIn, stopBargeIn } from './voice.js';
 
 const DEFAULT_SETTINGS = {
   model: 'sarvam-105b',
@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
   voiceLang: 'auto',
   voiceOut: true,
   autoSpeak: true,
+  bargeIn: true,
   speed: 'normal',
   voice: 'priya',
   webSearch: true,
@@ -58,7 +59,11 @@ export default function App() {
   const [view, setView] = React.useState('landing'); // 'landing' | 'chat'
   const [micListening, setMicListening] = React.useState(false);
   const [speakingNow, setSpeakingNow] = React.useState(false);
+  const [bargeInActive, setBargeInActive] = React.useState(false);
   const busyRef = React.useRef(false);
+  const pendingSearchRef = React.useRef(false);
+  const lastLangRef = React.useRef(null);
+  const sendRef = React.useRef(null);
 
   React.useEffect(() => {
     saveSettings(settings);
@@ -125,6 +130,47 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // keep the latest send() available to the barge-in recognizer callbacks
+  sendRef.current = send;
+
+  // Barge-in: while Priya is speaking, listen. If the user starts talking,
+  // stop her instantly, wait for the full sentence, then answer it.
+  React.useEffect(() => {
+    if (!(settings.bargeIn && settings.voiceOut && settings.autoSpeak)) return;
+    if (micListening) return; // user is already using push-to-talk
+
+    if (speakingNow && !bargeInActive) {
+      setBargeInActive(true);
+      setStatus({ state: 'busy', label: 'Listening…' });
+      startBargeIn(lastLangRef.current === 'hi' ? 'hi-IN' : 'en-IN', {
+        onInterrupt: () => {
+          stopSpeaking();
+          setStatus({ state: 'busy', label: 'Listening…' });
+        },
+        onStopWord: () => {
+          setStatus({ state: 'ready', label: 'Online' });
+        },
+        onFinal: (t) => {
+          setStatus({ state: 'busy', label: 'Thinking…' });
+          const s = sendRef.current;
+          if (s) s(t);
+        },
+        onEnd: () => {
+          setBargeInActive(false);
+          if (!speakingNow && !busyRef.current) {
+            setStatus({ state: 'ready', label: 'Online' });
+          }
+        }
+      });
+    }
+
+    if (!speakingNow && bargeInActive) {
+      setBargeInActive(false);
+      stopBargeIn();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakingNow, micListening, settings.bargeIn, settings.voiceOut, settings.autoSpeak]);
+
   const themeDark = React.useMemo(() => {
     const resolved =
       settings.theme === 'auto'
@@ -137,9 +183,10 @@ export default function App() {
     if (micListening) return 'listening';
     if (typing) return 'thinking';
     if (speakingNow) return 'speaking';
+    if (bargeInActive) return 'listening';
     if (!backend || !backend.ok || status.state === 'off') return 'error';
     return 'idle';
-  }, [micListening, typing, speakingNow, backend, status]);
+  }, [micListening, typing, speakingNow, bargeInActive, backend, status]);
 
   const send = async (rawText) => {
     const text = rawText.trim();
@@ -149,11 +196,15 @@ export default function App() {
     setTyping(true);
 
     const lang = detectLang(text);
+    lastLangRef.current = lang;
+    pendingSearchRef.current =
+      settings.webSearch &&
+      /(latest|current|today|now|news|version|pricing|price|cost|supported|documentation|docs|error|bug|fix|update|download|install|how to|2024|2025|2026)/i.test(text);
     const userMsg = { role: 'user', content: text, time: timeStr(), lang };
     const newHistory = [...messages, userMsg];
     setMessages(newHistory);
 
-    setStatus({ state: 'busy', label: 'Thinking…' });
+    setStatus({ state: 'busy', label: pendingSearchRef.current ? 'Searching the web…' : 'Thinking…' });
 
     try {
       const res = await sendChat({
@@ -168,10 +219,24 @@ export default function App() {
         content: res.reply,
         time: timeStr(),
         lang,
-        sources: res.sources && res.sources.length ? res.sources : undefined
+        sources: res.sources && res.sources.length ? res.sources : undefined,
+        searched: !!res.searched,
+        provider: res.provider,
+        model: res.model
       };
       setMessages((prev) => [...prev, priyaMsg]);
-      setStatus({ state: 'ready', label: res.searched ? 'Web search done' : 'Online' });
+      setStatus({ state: 'ready', label: res.searched ? '✓ Information updated' : 'Online' });
+
+      if (res.download) {
+        const blob = new Blob([res.download.content], { type: 'text/markdown' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = res.download.filename || 'priya-report.md';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast('Report downloaded');
+      }
+
       if (settings.voiceOut && settings.autoSpeak) {
         speak(res.reply, lang, { speed: settings.speed, voice: settings.voice });
       }
@@ -191,12 +256,14 @@ export default function App() {
     if (messages.length && !window.confirm('Clear the whole conversation?')) return;
     setMessages([]);
     stopSpeaking();
+    stopBargeIn();
     setStatus({ state: 'ready', label: backend && backend.ok ? 'Online' : 'Backend offline' });
   };
 
   const newChat = () => {
     setMessages([]);
     stopSpeaking();
+    stopBargeIn();
   };
 
   const exportChat = () => {
@@ -256,6 +323,8 @@ export default function App() {
   const statusLabel =
     (status.label || '') + (backend && backend.ok && !backend.configured ? ' — set GEMINI_API_KEY' : '');
 
+  const thinkingLabel = pendingSearchRef.current ? '🌐 Searching the web…' : 'Priya is thinking…';
+
   return (
     <div className="app">
       <Navbar
@@ -286,6 +355,7 @@ export default function App() {
           onBack={goHome}
           voiceLang={settings.voiceLang}
           onListeningChange={setMicListening}
+          thinkingLabel={thinkingLabel}
         />
       )}
 

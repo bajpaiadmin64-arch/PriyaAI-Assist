@@ -88,4 +88,72 @@ async function webSearch(q, limit = 5) {
   return duckDuckGoSearch(q, l);
 }
 
-module.exports = { webSearch };
+/**
+ * Fetch a public web page and extract readable text (for documentation/current info).
+ * Only http/https URLs. Never follows redirects off-site beyond 3 hops.
+ * @param {string} url
+ * @param {number} [maxChars]
+ * @returns {Promise<{title:string, url:string, text:string}>}
+ */
+async function fetchPage(url, maxChars = 6000) {
+  let target = String(url || '').trim();
+  if (!/^https?:\/\//i.test(target)) {
+    const err = new Error('Only http(s) web pages can be opened.');
+    err.status = 400;
+    throw err;
+  }
+  if (target.length > 2048) {
+    const err = new Error('URL is too long.');
+    err.status = 400;
+    throw err;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+
+  let res;
+  try {
+    res = await fetch(target, {
+      headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+      redirect: 'follow',
+      signal: controller.signal
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    const err = new Error('Priya could not open that page (network error or timeout).');
+    err.status = 502;
+    throw err;
+  }
+  clearTimeout(timer);
+
+  if (!res.ok) {
+    const err = new Error(`That page returned HTTP ${res.status}.`);
+    err.status = 502;
+    throw err;
+  }
+
+  const html = await res.text().catch(() => '');
+  const title = cleanText((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || target);
+
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!text) {
+    const err = new Error('That page has no readable text content.');
+    err.status = 502;
+    throw err;
+  }
+
+  return { title, url: target, text: text.slice(0, maxChars) };
+}
+
+module.exports = { webSearch, fetchPage };

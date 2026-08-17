@@ -36,9 +36,10 @@ function friendlyError(status, body) {
  * @param {string} opts.system   system prompt
  * @param {Array<{role:string,content:string}>} opts.messages  history + latest (roles 'user'/'model')
  * @param {number} [opts.temperature]
+ * @param {AbortSignal} [opts.signal]
  * @returns {Promise<{text:string, model:string}>}
  */
-async function chatSarvam({ system, messages, temperature }) {
+async function chatSarvam({ system, messages, temperature, signal }) {
   if (!hasKey()) {
     const err = new Error('Sarvam API key is not configured on the server.');
     err.status = 503;
@@ -69,7 +70,8 @@ async function chatSarvam({ system, messages, temperature }) {
         'Content-Type': 'application/json',
         'api-subscription-key': process.env.SARVAM_API_KEY
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
   } catch (e) {
     const err = new Error('Priya is temporarily unable to connect to the AI service (network issue). Please try again.');

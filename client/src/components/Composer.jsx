@@ -1,5 +1,5 @@
 import React from 'react';
-import { speechSupported, createRecognizer, pickSTTLang } from '../voice.js';
+import { speechSupported, createRecognizer, pickSTTLang, stopBargeIn } from '../voice.js';
 
 export default function Composer({ onSend, disabled, voiceLang, conversationLang, onListeningChange }) {
   const [text, setText] = React.useState('');
@@ -36,6 +36,7 @@ export default function Composer({ onSend, disabled, voiceLang, conversationLang
       recognizerRef.current && recognizerRef.current.stop();
       return;
     }
+    stopBargeIn();
     if (!recognizerRef.current) {
       const r = createRecognizer();
       if (!r) { toast('Voice input is not supported in this browser'); return; }
