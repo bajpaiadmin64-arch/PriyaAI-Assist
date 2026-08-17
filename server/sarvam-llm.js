@@ -36,10 +36,11 @@ function friendlyError(status, body) {
  * @param {string} opts.system   system prompt
  * @param {Array<{role:string,content:string}>} opts.messages  history + latest (roles 'user'/'model')
  * @param {number} [opts.temperature]
+ * @param {number} [opts.maxTokens]
  * @param {AbortSignal} [opts.signal]
  * @returns {Promise<{text:string, model:string}>}
  */
-async function chatSarvam({ system, messages, temperature, signal }) {
+async function chatSarvam({ system, messages, temperature, maxTokens, signal }) {
   if (!hasKey()) {
     const err = new Error('Sarvam API key is not configured on the server.');
     err.status = 503;
@@ -61,6 +62,9 @@ async function chatSarvam({ system, messages, temperature, signal }) {
     messages: chatMessages,
     temperature: typeof temperature === 'number' ? temperature : 0.7
   };
+  // sarvam-105b is a reasoning model: it spends output budget on hidden
+  // chain-of-thought, so give it extra room above the answer cap.
+  if (maxTokens) body.max_tokens = maxTokens + 768;
 
   let res;
   try {

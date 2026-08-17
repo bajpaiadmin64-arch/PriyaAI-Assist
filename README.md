@@ -35,7 +35,7 @@ The **API key lives only on the server** (environment variable). It is never sen
 - 🧮 **Calculator tool** (`!calc 1245*87` or just type a math expression)
 - 🌐 **Page reader tool** (`!open https://…` to read a public page's current content)
 - 📄 **Report download** — ask Priya to "create a report" and she saves it as a file
-- ⚡ **Provider fallback** — Gemini → Sarvam chain (configurable via `CHAT_PROVIDERS`), with retry, timeouts, and an honest "Priya is using …" indicator
+- ⚡ **AI limits & fallback system** — up to 5 providers (Gemini → Sarvam → Groq → OpenRouter → OpenAI, configurable via `CHAT_PROVIDERS`). Rate-limited/failing providers are cooled down for 90s and Priya switches automatically; every call retries once with backoff. Token diet (bounded history, mode-based output caps, small search context) keeps free-tier usage low. Live provider status + free-key instructions inside Settings → AI providers.
 - 🪪 **Core identity** — owner/developer is Utkarsh Bajpai; "I was designed and developed by Utkarsh Bajpai."
 - 📋 Copy / code-copy buttons, markdown rendering, multi-turn context
 - 🧹 New conversation, clear, export chat (.md)
@@ -75,7 +75,7 @@ npm install
 # 2. configure the secret
 cp .env.example .env
 # -> open .env and set SARVAM_API_KEY=your_real_key_here (chat + voice)
-# -> optional: GEMINI_API_KEY for Gemini as the preferred chat model
+# -> optional free keys: GEMINI_API_KEY (aistudio.google.com/apikey), GROQ_API_KEY (console.groq.com/keys)
 
 # 3. run backend (port 3000)
 npm run dev:server
@@ -97,9 +97,18 @@ npm start         # serves API + built frontend on PORT (default 3000)
 
 | Variable | Required | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | ✅ | Google Gemini API key — get a free one at https://aistudio.google.com/apikey |
-| `GEMINI_MODEL` | ❌ | Override model, e.g. `gemini-3.5-flash` (default: `gemini-3.6-flash`) |
+| `GEMINI_API_KEY` | ⚪ | Google Gemini API key (free tier) — get one at https://aistudio.google.com/apikey |
+| `SARVAM_API_KEY` | ✅ | Sarvam AI key (chat + voice) — https://dashboard.sarvam.ai |
+| `GROQ_API_KEY` | ⚪ | Groq API key (free, no card) — https://console.groq.com/keys |
+| `OPENROUTER_API_KEY` | ⚪ | OpenRouter key for free/other models — https://openrouter.ai/keys |
+| `OPENAI_API_KEY` | ⚪ | OpenAI API key (paid) — https://platform.openai.com/api-keys |
+| `GEMINI_MODEL` | ❌ | Override Gemini model, e.g. `gemini-3.5-flash` |
+| `GROQ_MODEL` | ❌ | Override Groq model (default `llama-3.3-70b-versatile`) |
+| `SARVAM_LLM_MODEL` | ❌ | Override Sarvam model (default `sarvam-105b`) |
+| `CHAT_PROVIDERS` | ❌ | Fallback order (default `gemini,sarvam,groq,openrouter,openai`) |
 | `PORT` | ❌ | Backend port (Render sets it automatically) |
+
+Priya only uses providers whose key is set, and never leaks keys. Free tiers are metered: on a rate limit Priya cools that provider down and switches automatically, so a single provider being exhausted never blocks the chat.
 
 Never commit `.env`. It is ignored by `.gitignore`.
 
@@ -141,8 +150,8 @@ Pushing to `main` triggers an automatic redeploy.
 
 ## Security notes
 
-- `GEMINI_API_KEY` is read only by the backend from `process.env`.
-- The frontend never receives or sends the key.
-- The server never logs the key.
+- Provider keys are read only by the backend from `process.env`.
+- The frontend never receives or sends the keys; `/api/health` only reports *whether* a provider is configured.
+- The server never logs the keys.
 - Free tier note: enabling billing on a Gemini project removes its free tier. Keep the key's project billing-free for free usage.
 - Render free web services spin down after 15 minutes idle and spin back up on the next request (a few seconds).

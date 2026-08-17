@@ -4,6 +4,7 @@ const MODELS = ['sarvam-105b', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gem
 
 export default function SettingsModal({ open, settings, onChange, onClose }) {
   const [voicesInfo, setVoicesInfo] = React.useState(null);
+  const [providers, setProviders] = React.useState(null);
 
   React.useEffect(() => {
     if (!open) return;
@@ -16,6 +17,14 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
         if (alive) setVoicesInfo(data);
       } catch (e) {
         if (alive) setVoicesInfo(null);
+      }
+      try {
+        const res = await fetch('/api/health');
+        if (!res.ok) throw new Error('no health');
+        const data = await res.json();
+        if (alive) setProviders(data.providers || null);
+      } catch (e) {
+        if (alive) setProviders(null);
       }
     })();
     return () => { alive = false; };
@@ -56,6 +65,39 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
               ))}
             </div>
             <p className="field-hint">Sarvam-105B (Indian languages) is used when no Gemini key is set. The server picks the best available model.</p>
+          </div>
+
+          {/* ------- AI providers ------- */}
+          <div className="field providers-field">
+            <label>AI providers</label>
+            {providers ? (
+              <>
+                {providers.map((p) => (
+                  <div key={p.name} className="provider-row">
+                    <span className={`vs-dot ${p.configured ? 'on' : ''}`} />
+                    <div className="provider-info">
+                      <strong>{p.label}</strong>
+                      <span className="provider-meta">
+                        {p.configured ? `${p.model}` : 'not configured'}
+                        {p.cooldownSec > 0 ? ` · cooling down ${p.cooldownSec}s after rate limit` : ''}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+                <p className="field-hint">
+                  Priya auto-switches when one provider hits its free limit. Add keys in the server&apos;s{' '}
+                  <code>.env</code> file:
+                </p>
+                <ul className="provider-list">
+                  <li><strong>Gemini</strong> — free tier · <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com/apikey</a> → Create API key. Env: <code>GEMINI_API_KEY</code></li>
+                  <li><strong>Groq</strong> — free, no card · <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a>. Env: <code>GROQ_API_KEY</code></li>
+                  <li><strong>Sarvam AI</strong> — Indian languages · <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer">dashboard.sarvam.ai</a>. Env: <code>SARVAM_API_KEY</code></li>
+                  <li><strong>OpenRouter</strong> — free models · <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">openrouter.ai/keys</a>. Env: <code>OPENROUTER_API_KEY</code></li>
+                </ul>
+              </>
+            ) : (
+              <p className="field-hint">Checking provider status…</p>
+            )}
           </div>
 
           <div className="field">

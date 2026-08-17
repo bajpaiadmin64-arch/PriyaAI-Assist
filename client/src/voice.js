@@ -146,7 +146,11 @@ function browserSpeak(text, lang, speed) {
 export async function speak(rawText, lang, opts = {}) {
   stopSpeaking();
 
-  const { text } = prepareForSpeech(rawText, { lang });
+  const { text: prepared } = prepareForSpeech(rawText, { lang });
+
+  // TTS quota cap: long replies are truncated to the first ~900 chars
+  // so voice never drains the server TTS budget.
+  const text = prepared.length > 900 ? prepared.slice(0, 900) : prepared;
 
   // 1) Premium backend voice (Sarvam AI -> ElevenLabs on the server)
   if (Date.now() >= backendUnavailableUntil) {

@@ -4,18 +4,11 @@ require('dotenv').config();
 
 const path = require('path');
 const express = require('express');
-const { chatGemini, getModel, hasKey } = require('./gemini');
-const { chatSarvam, hasKey: hasSarvamKey, getModel: getSarvamModel } = require('./sarvam-llm');
+const { callWithFallback, providerStatus } = require('./providers');
 const { webSearch, fetchPage } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
 const { calc } = require('./calc');
 const { synthesize, ttsStatus, SARVAM_VOICES } = require('./tts');
-
-// Provider fallback order (configurable). Gemini is skipped when no key is set.
-const PROVIDER_ORDER = (process.env.CHAT_PROVIDERS || 'gemini,sarvam')
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,22 +25,16 @@ app.use((req, _res, next) => {
   next();
 });
 
-// Active chat provider: Gemini if its key is set, otherwise Sarvam AI (both can coexist; Gemini wins).
-function activeProvider() {
-  if (hasKey()) return { name: 'gemini', model: getModel() };
-  if (hasSarvamKey()) return { name: 'sarvam', model: getSarvamModel() };
-  return { name: 'none', model: null };
-}
-
 /* ---------- Health ---------- */
 app.get('/api/health', (_req, res) => {
-  const provider = activeProvider();
+  const providers = providerStatus();
+  const configured = providers.find((p) => p.configured);
   res.json({
     status: 'ok',
-    model: provider.model,
-    configured: provider.name !== 'none',
-    provider: provider.name,
-    providers: PROVIDER_ORDER
+    model: configured ? configured.model : null,
+    configured: !!configured,
+    provider: configured ? configured.name : 'none',
+    providers
   });
 });
 
@@ -59,6 +46,29 @@ const SEARCH_RE =
 // "create a report/file" intent → produces a downloadable file
 const DOWNLOAD_RE =
   /(create|make|generate|save|download|write|banao|bana de|create karo|download karo|bana do).{0,40}(report|file|document|summary|notes?|guide|list)/i;
+
+// Token diet: cap how much conversation history is sent to the model.
+// Recent turns are kept whole; older turns are dropped beyond the budget.
+const HISTORY_BUDGET_CHARS = 6000; // ~1500 tokens
+const HISTORY_MAX_TURNS = 12;
+
+function trimHistory(messages) {
+  const recent = messages.slice(-HISTORY_MAX_TURNS);
+  let total = 0;
+  const kept = [];
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const content = recent[i].content || '';
+    if (total + content.length > HISTORY_BUDGET_CHARS && kept.length >= 2) break;
+    kept.unshift(recent[i]);
+    total += content.length;
+  }
+  return kept;
+}
+
+// Output budget per mode — shorter replies = far lower token burn.
+function maxTokensFor(mode) {
+  return mode === 'tech' ? 1024 : mode === 'simple' ? 384 : 512;
+}
 
 function isPureMath(s) {
   return (
@@ -113,6 +123,7 @@ app.post('/api/chat', async (req, res, next) => {
     }
 
     /* ---------- Optional live web search ---------- */
+    // Token diet: fewer results, short snippets — search context stays small.
     let sources = [];
     let searched = false;
     let searchStatus = 'none';
@@ -124,12 +135,15 @@ app.post('/api/chat', async (req, res, next) => {
     if (!toolResult && wantsSearch) {
       const q = explicitSearch ? explicitSearch[1] : cleanMessage;
       try {
-        sources = await webSearch(q, 5);
+        sources = await webSearch(q, 4);
         searched = sources.length > 0;
         if (searched) {
           searchStatus = 'ok';
           searchContext = sources
-            .map((s, i) => `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${s.snippet || ''}`)
+            .map(
+              (s, i) =>
+                `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${(s.snippet || '').slice(0, 160)}`
+            )
             .join('\n');
         } else {
           searchStatus = 'failed';
@@ -153,76 +167,45 @@ app.post('/api/chat', async (req, res, next) => {
       });
     }
 
+    /* ---------- Optional downloadable report ---------- */
+    const wantsDownload = !!toolResult || (!!openMatch ? false : DOWNLOAD_RE.test(cleanMessage));
+
     /* ---------- AI response with provider fallback ---------- */
     const system = buildSystemPrompt({ mode, lang, searchContext, searchStatus });
-    const messages = [...cleanHistory.map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
+    // Token diet: bounded history instead of the full conversation.
+    const messages = [...trimHistory(cleanHistory).map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
     if (toolResult && toolResult.context) messages.push({ role: 'user', content: toolResult.context });
 
-    const configured = PROVIDER_ORDER.filter(
-      (name) => (name === 'gemini' && hasKey()) || (name === 'sarvam' && hasSarvamKey())
-    );
-    if (configured.length === 0) {
-      const err = new Error('No AI service configured on the server.');
-      err.status = 503;
-      err.code = 'MISSING_KEY';
-      throw err;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 45000);
+    try {
+      const { text, provider, model } = await callWithFallback({
+        system,
+        messages,
+        temperature: 0.7,
+        maxTokens: maxTokensFor(mode),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      return res.json({
+        reply: text,
+        sources,
+        searched,
+        tool: false,
+        provider,
+        model,
+        searchStatus,
+        download: wantsDownload
+          ? {
+              filename: `priya-${new Date().toISOString().slice(0, 10)}.md`,
+              content: text
+            }
+          : null
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
     }
-
-    let reply = '';
-    let usedProvider = null;
-    let lastError = null;
-
-    for (const name of configured) {
-      const call = name === 'gemini' ? chatGemini : chatSarvam;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 30000);
-        try {
-          const { text } = await call({ system, messages, temperature: 0.7, signal: controller.signal });
-          clearTimeout(timer);
-          reply = text;
-          usedProvider = name;
-          break;
-        } catch (e) {
-          clearTimeout(timer);
-          lastError = e;
-          // retry once on transient failures (rate limit / 5xx / network), else move to next provider
-          const transient = e.status === 429 || (e.status >= 500 && e.status <= 599) || e.status === 502;
-          if (attempt === 0 && transient) continue;
-          break;
-        }
-      }
-      if (reply) break;
-    }
-
-    if (!reply) {
-      const err = new Error(
-        lastError && lastError.message
-          ? lastError.message
-          : 'All AI services are temporarily unavailable. Please try again in a moment.'
-      );
-      err.status = lastError && lastError.status ? lastError.status : 503;
-      throw err;
-    }
-
-    /* ---------- Optional downloadable report ---------- */
-    let download = null;
-    if (!openMatch && DOWNLOAD_RE.test(cleanMessage)) {
-      download = {
-        filename: `priya-${new Date().toISOString().slice(0, 10)}.md`,
-        content: reply
-      };
-    }
-
-    res.json({
-      reply,
-      sources,
-      searched,
-      provider: usedProvider,
-      model: usedProvider === 'gemini' ? getModel() : getSarvamModel(),
-      searchStatus,
-      download
-    });
   } catch (e) {
     next(e);
   }
@@ -298,7 +281,10 @@ if (process.env.NODE_ENV === 'production' || require('fs').existsSync(path.join(
 app.use((err, _req, res, _next) => {
   console.error('api error:', err.message);
   if (err.status === 503 && err.code === 'MISSING_KEY') {
-    return res.status(503).json({ error: 'AI service is not configured yet. Please set the GEMINI_API_KEY or SARVAM_API_KEY on the server.' });
+    return res.status(503).json({
+      error:
+        'No AI provider is configured on the server. Set GEMINI_API_KEY, SARVAM_API_KEY or GROQ_API_KEY in the server .env file and restart.'
+    });
   }
   const status = typeof err.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
   res.status(status).json({
@@ -308,7 +294,7 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`Priya AI backend running on http://localhost:${PORT}`);
-  const provider = activeProvider();
-  console.log(`Chat provider: ${provider.name} (${provider.model || 'none'})`);
-  console.log(`Gemini key configured: ${hasKey()} | Sarvam key configured: ${hasSarvamKey()}`);
+  for (const p of providerStatus()) {
+    console.log(`  ${p.name.padEnd(11)} configured=${p.configured} model=${p.model || '-'}`);
+  }
 });

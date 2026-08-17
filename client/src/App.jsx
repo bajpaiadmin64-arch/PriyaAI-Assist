@@ -206,7 +206,8 @@ export default function App() {
     try {
       const res = await sendChat({
         message: text,
-        history: messages.map((m) => ({ role: m.role, content: m.content })),
+        // Token diet: send only the most recent turns.
+        history: messages.slice(-12).map((m) => ({ role: m.role, content: m.content })),
         mode: settings.mode,
         useWebSearch: settings.webSearch,
         lang
