@@ -5,6 +5,9 @@ require('dotenv').config();
 const path = require('path');
 const express = require('express');
 const { callWithFallback, providerStatus } = require('./providers');
+const store = require('./provider-store');
+const providerSystem = require('./provider-system');
+const { CATALOG, CUSTOM_ID, findProvider, defaultOrder } = require('./model-catalog');
 const { webSearch, fetchPage } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
 const { calc } = require('./calc');
@@ -30,13 +33,131 @@ app.use((req, _res, next) => {
 app.get('/api/health', (_req, res) => {
   const providers = providerStatus();
   const configured = providers.find((p) => p.configured);
+  const selected = store.getSelected();
+  const selInfo = selected ? providerSystem.credsFor(selected) : null;
   res.json({
     status: 'ok',
     model: configured ? configured.model : null,
     configured: !!configured,
     provider: configured ? configured.name : 'none',
-    providers
+    providers,
+    selected: selInfo ? { provider: selected, label: selInfo.name, model: selInfo.model } : null
   });
+});
+
+/* ---------- AI Provider Manager (Settings → AI Models & API) ---------- */
+
+// Full provider view for the settings UI. Never contains a complete key.
+function providerListView() {
+  const selected = store.getSelected();
+  const stored = store.list();
+  const list = [];
+  for (const entry of CATALOG) {
+    const row = stored.find((p) => p.id === entry.id);
+    list.push({
+      id: entry.id,
+      name: entry.name,
+      apiFormat: entry.apiFormat,
+      baseUrl: entry.baseUrl,
+      docs: entry.docs,
+      notes: entry.notes,
+      keyEnv: entry.keyEnv,
+      models: entry.models,
+      source: row ? row.source : null,
+      maskedKey: row ? row.maskedKey : null,
+      model: row ? row.model : null,
+      configured: !!store.getKey(entry.id),
+      selected: selected === entry.id
+    });
+  }
+  const customRow = stored.find((p) => p.id === CUSTOM_ID);
+  list.push({
+    id: CUSTOM_ID,
+    name: 'Custom (OpenAI-compatible)',
+    apiFormat: 'openai',
+    baseUrl: customRow && customRow.baseUrl ? customRow.baseUrl : null,
+    docs: null,
+    notes: 'Any OpenAI-compatible endpoint: base URL, model, key. E.g. LM Studio, Ollama, local servers, or private gateways.',
+    models: [],
+    source: customRow ? customRow.source : null,
+    maskedKey: customRow ? customRow.maskedKey : null,
+    model: customRow ? customRow.model : null,
+    configured: !!store.getKey(CUSTOM_ID),
+    selected: selected === CUSTOM_ID
+  });
+  return list;
+}
+
+app.get('/api/providers', (_req, res) => {
+  const cooldowns = providerStatus();
+  const providers = providerListView().map((p) => {
+    const cd = cooldowns.find((c) => c.name === p.id);
+    return { ...p, cooldownSec: cd ? cd.cooldownSec : 0 };
+  });
+  const selected = store.getSelected();
+  res.json({ providers, selected, order: store.getOrder(), defaultOrder: defaultOrder() });
+});
+
+app.post('/api/providers/test', async (req, res, next) => {
+  try {
+    const { providerId, apiKey, model, baseUrl, name } = req.body || {};
+    if (!providerId || typeof providerId !== 'string') {
+      return res.status(400).json({ error: 'providerId is required.' });
+    }
+    const result = await providerSystem.testConnection(providerId.trim(), { apiKey, model, baseUrl, name });
+    res.json(result);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.put('/api/providers/keys', async (req, res, next) => {
+  try {
+    const { providerId, apiKey, model, baseUrl, name } = req.body || {};
+    if (!providerId || typeof providerId !== 'string') {
+      return res.status(400).json({ error: 'providerId is required.' });
+    }
+    const id = providerId.trim();
+    if (id === 'custom' && (!baseUrl || !baseUrl.trim())) {
+      return res.status(400).json({ error: 'A Base URL is required for custom providers.' });
+    }
+    if (apiKey && typeof apiKey === 'string' && apiKey.trim().length > 400) {
+      return res.status(400).json({ error: 'API key looks too long (max 400 characters).' });
+    }
+    const entry = findProvider(id);
+    if (!entry && id !== CUSTOM_ID) {
+      return res.status(400).json({ error: `Unknown provider: ${id}` });
+    }
+    const masked = store.set(id, { apiKey, model, baseUrl, name });
+    res.json({ ok: true, maskedKey: masked, configured: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.delete('/api/providers/keys/:providerId', (req, res) => {
+  const id = (req.params.providerId || '').trim();
+  store.remove(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/providers/select', (req, res) => {
+  const id = (req.body && req.body.providerId ? req.body.providerId : '').trim();
+  if (!id) return res.status(400).json({ error: 'providerId is required.' });
+  const ok = store.setSelected(id);
+  if (!ok) {
+    return res.status(400).json({ error: 'That provider has no API key configured yet — add one first.' });
+  }
+  const cfg = providerSystem.credsFor(id);
+  res.json({ ok: true, selected: id, provider: id, model: cfg.model, label: findProvider(id) ? findProvider(id).name : 'Custom' });
+});
+
+app.get('/api/providers/selection', (_req, res) => {
+  const id = store.getSelected();
+  if (!id) return res.json({ selected: null });
+  const cfg = providerSystem.credsFor(id);
+  const entry = findProvider(id);
+  res.json({ selected: id, provider: id, model: cfg.model, label: entry ? entry.name : 'Custom' });
 });
 
 /* ---------- Chat ---------- */
@@ -53,17 +174,30 @@ const DOWNLOAD_RE =
 const HISTORY_BUDGET_CHARS = 6000; // ~1500 tokens
 const HISTORY_MAX_TURNS = 12;
 
-function trimHistory(messages) {
+function trimHistory(messages, budgetChars) {
+  const budget = typeof budgetChars === 'number' && budgetChars > 0 ? budgetChars : HISTORY_BUDGET_CHARS;
   const recent = messages.slice(-HISTORY_MAX_TURNS);
   let total = 0;
   const kept = [];
   for (let i = recent.length - 1; i >= 0; i--) {
     const content = recent[i].content || '';
-    if (total + content.length > HISTORY_BUDGET_CHARS && kept.length >= 2) break;
+    if (total + content.length > budget && kept.length >= 2) break;
     kept.unshift(recent[i]);
     total += content.length;
   }
   return kept;
+}
+
+// Per-model context window: small-context models get a smaller history
+// budget; large ones stay within the cost-friendly token diet cap.
+function contextBudgetChars() {
+  const sel = store.getSelected();
+  if (!sel) return HISTORY_BUDGET_CHARS;
+  const cfg = providerSystem.credsFor(sel);
+  const entry = findProvider(sel);
+  const m = entry && entry.models.find((x) => x.id === cfg.model);
+  const ctx = m && m.context ? m.context : 32768;
+  return Math.min(HISTORY_BUDGET_CHARS, Math.max(1500, Math.round(ctx / 4)));
 }
 
 // Output budget per mode — shorter replies = far lower token burn.
@@ -88,9 +222,150 @@ function isStub(text) {
     /(search|research|gather|look up|find out|start|check)/i.test(t);
 }
 
+// Shared pipeline: validation, tool routing, optional search. Returns the
+// context used by both the JSON and the streaming chat handlers.
+async function prepareChat({ message, history, mode, useWebSearch, lang }) {
+  const cleanMessage = message.trim();
+  const cleanHistory = Array.isArray(history)
+    ? history
+        .filter((m) => m && typeof m.content === 'string' && typeof m.role === 'string')
+        .slice(-30)
+    : [];
+
+  let toolResult = null;
+
+  let calcMatch = cleanMessage.match(/^!calc\s+([\s\S]+)$/i);
+  if (!calcMatch && isPureMath(cleanMessage)) calcMatch = ['', cleanMessage];
+
+  if (calcMatch) {
+    const r = calc(calcMatch[1]);
+    if (r.ok) {
+      toolResult = { text: `🧮 ${r.expr} = **${r.value}**` };
+    } else {
+      toolResult = { text: 'That expression is not a valid math expression. Try e.g. `!calc (1245*87) + 2^10`.' };
+    }
+  }
+
+  const openMatch = cleanMessage.match(/^!open\s+(\S+)$/i);
+  if (!toolResult && openMatch) {
+    const page = await fetchPage(openMatch[1]);
+    toolResult = {
+      text: `I read the page "${page.title}" (${page.url}) — summary below.`,
+      context: `PAGE CONTENT (fetched just now from ${page.url}):\n${page.text}`
+    };
+  }
+
+  let sources = [];
+  let searched = false;
+  let searchStatus = 'none';
+  let searchContext = '';
+
+  const explicitSearch = cleanMessage.match(/^!search\s+([\s\S]+)$/i);
+  const wantsSearch = !!explicitSearch || (!!useWebSearch && SEARCH_RE.test(cleanMessage));
+
+  if (!toolResult && wantsSearch) {
+    const q = explicitSearch ? explicitSearch[1] : cleanMessage;
+    try {
+      sources = await webSearch(q, 4);
+      searched = sources.length > 0;
+      if (searched) {
+        searchStatus = 'ok';
+        searchContext = sources
+          .map((s, i) => `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${(s.snippet || '').slice(0, 160)}`)
+          .join('\n');
+      } else {
+        searchStatus = 'failed';
+      }
+    } catch (e) {
+      console.error('search failed:', e.message);
+      searchStatus = 'failed';
+    }
+  }
+
+  const wantsDownload = !!toolResult || (!!openMatch ? false : DOWNLOAD_RE.test(cleanMessage));
+  const wantsCsv = !toolResult && !openMatch && /csv|spreadsheet|excel|\.csv|table banao|list banao|sari cheezein/i.test(cleanMessage);
+
+  const system = buildSystemPrompt({ mode, lang, searchContext, searchStatus });
+  const messages = [...trimHistory(cleanHistory, contextBudgetChars()).map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
+  if (toolResult && toolResult.context) messages.push({ role: 'user', content: toolResult.context });
+
+  return {
+    toolResult, openMatch, sources, searched, searchStatus, searchContext,
+    system, messages, wantsDownload, wantsCsv, mode, lang
+  };
+}
+
+function buildDownload(text, wantsDownload, wantsCsv) {
+  const csv = wantsCsv ? replyToCsv(text) : null;
+  if (wantsDownload) {
+    return { filename: `priya-${new Date().toISOString().slice(0, 10)}.md`, content: text, kind: 'md' };
+  }
+  if (csv) {
+    return { filename: `priya-${new Date().toISOString().slice(0, 10)}.csv`, content: csv, kind: 'csv' };
+  }
+  return null;
+}
+
+// Streaming branch: SSE deltas of the final model answer. Returns false when
+// the response must be sent as normal JSON instead (no streaming support).
+async function streamAnswer(res, ctx, providerId) {
+  const selected = providerId || store.getSelected() || null;
+  if (!selected || !providerSystem.supportsStreaming(selected)) return false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90000);
+  try {
+    const gen = providerSystem.streamChatWith(selected, {
+      system: ctx.system,
+      messages: ctx.messages,
+      temperature: 0.7,
+      maxTokens: maxTokensFor(ctx.mode),
+      signal: controller.signal
+    });
+    if (!gen) {
+      clearTimeout(timer);
+      return false;
+    }
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    const send = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (e) { /* client gone */ } };
+    const cfg = providerSystem.credsFor(selected);
+    send({ type: 'start', provider: selected, model: cfg.model });
+    let text = '';
+    for await (const delta of gen) {
+      text += delta;
+      send({ type: 'delta', text: delta });
+    }
+    clearTimeout(timer);
+    if (!text.trim() || isStub(text)) {
+      send({ type: 'error', message: 'Priya got an incomplete response from the AI service — please try again.' });
+      res.end();
+      return true;
+    }
+    send({
+      type: 'done',
+      reply: text,
+      provider: selected,
+      model: cfg.model,
+      sources: ctx.sources,
+      searched: ctx.searched,
+      searchStatus: ctx.searchStatus,
+      download: buildDownload(text, ctx.wantsDownload, ctx.wantsCsv)
+    });
+    res.end();
+    return true;
+  } catch (e) {
+    clearTimeout(timer);
+    const msg = (e && e.status >= 400 && e.status < 600) ? e.message : 'Priya hit a temporary issue — please try again.';
+    try { res.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`); res.end(); } catch (err) { /* ignore */ }
+    return true;
+  }
+}
+
 app.post('/api/chat', async (req, res, next) => {
   try {
-    const { message, history, mode, useWebSearch, lang } = req.body || {};
+    const { message, history, mode, useWebSearch, lang, providerId, stream } = req.body || {};
 
     if (!message || typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ error: 'Message is required.' });
@@ -99,125 +374,62 @@ app.post('/api/chat', async (req, res, next) => {
       return res.status(400).json({ error: 'Message is too long (max 20000 characters).' });
     }
 
-    const cleanMessage = message.trim();
-    const cleanHistory = Array.isArray(history)
-      ? history
-          .filter((m) => m && typeof m.content === 'string' && typeof m.role === 'string')
-          .slice(-30)
-      : [];
-
-    /* ---------- Tool routing ---------- */
-    let toolResult = null; // { text } direct answer (no LLM needed)
-
-    // !calc <expr>
-    let calcMatch = cleanMessage.match(/^!calc\s+([\s\S]+)$/i);
-    if (!calcMatch && isPureMath(cleanMessage)) calcMatch = ['', cleanMessage];
-
-    if (calcMatch) {
-      const r = calc(calcMatch[1]);
-      if (r.ok) {
-        toolResult = { text: `🧮 ${r.expr} = **${r.value}**` };
-      } else {
-        toolResult = { text: 'That expression is not a valid math expression. Try e.g. `!calc (1245*87) + 2^10`.' };
-      }
-    }
-
-    // !open <url> → read a public page
-    const openMatch = cleanMessage.match(/^!open\s+(\S+)$/i);
-    if (!toolResult && openMatch) {
-      const page = await fetchPage(openMatch[1]);
-      toolResult = {
-        text: `I read the page "${page.title}" (${page.url}) — summary below.`,
-        context: `PAGE CONTENT (fetched just now from ${page.url}):\n${page.text}`
-      };
-    }
-
-    /* ---------- Optional live web search ---------- */
-    // Token diet: fewer results, short snippets — search context stays small.
-    let sources = [];
-    let searched = false;
-    let searchStatus = 'none';
-    let searchContext = '';
-
-    const explicitSearch = cleanMessage.match(/^!search\s+([\s\S]+)$/i);
-    const wantsSearch = !!explicitSearch || (!!useWebSearch && SEARCH_RE.test(cleanMessage));
-
-    if (!toolResult && wantsSearch) {
-      const q = explicitSearch ? explicitSearch[1] : cleanMessage;
-      try {
-        sources = await webSearch(q, 4);
-        searched = sources.length > 0;
-        if (searched) {
-          searchStatus = 'ok';
-          searchContext = sources
-            .map(
-              (s, i) =>
-                `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${(s.snippet || '').slice(0, 160)}`
-            )
-            .join('\n');
-        } else {
-          searchStatus = 'failed';
-        }
-      } catch (e) {
-        console.error('search failed:', e.message);
-        searchStatus = 'failed';
-      }
-    }
+    const ctx = await prepareChat({ message, history, mode, useWebSearch, lang });
 
     /* ---------- Direct tool answers (no LLM call) ---------- */
-    if (toolResult) {
+    if (ctx.toolResult) {
       return res.json({
-        reply: toolResult.text,
-        sources,
-        searched,
+        reply: ctx.toolResult.text,
+        sources: ctx.sources,
+        searched: ctx.searched,
         tool: true,
         provider: 'tool',
         model: null,
-        searchStatus
+        searchStatus: ctx.searchStatus
       });
     }
 
-    /* ---------- Optional downloadable report ---------- */
-    const wantsDownload = !!toolResult || (!!openMatch ? false : DOWNLOAD_RE.test(cleanMessage));
-    const wantsCsv = !toolResult && !openMatch && /csv|spreadsheet|excel|\.csv|table banao|list banao|sari cheezein/i.test(cleanMessage);
+    /* ---------- Streaming (when the selected model supports it) ---------- */
+    if (stream) {
+      const handled = await streamAnswer(res, ctx, providerId);
+      if (handled) return; // SSE was sent
+      // else: fall through to the normal JSON path
+    }
 
     /* ---------- AI response with provider fallback ---------- */
-    const system = buildSystemPrompt({ mode, lang, searchContext, searchStatus });
-    // Token diet: bounded history instead of the full conversation.
-    const messages = [...trimHistory(cleanHistory).map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: cleanMessage }];
-    if (toolResult && toolResult.context) messages.push({ role: 'user', content: toolResult.context });
-
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 90000);
     try {
       let result = await callWithFallback({
-        system,
-        messages,
+        system: ctx.system,
+        messages: ctx.messages,
         temperature: 0.7,
-        maxTokens: maxTokensFor(mode),
-        signal: controller.signal
+        maxTokens: maxTokensFor(ctx.mode),
+        signal: controller.signal,
+        providerId
       });
 
       // The model asked for a web search in its reply (Sarvam emits tool-call
       // markup as text). Run the real search and retry once with results.
       let retriedTool = false;
-      if (result.requestedTool && result.toolQuery && !searched && !retriedTool) {
+      if (result.requestedTool && result.toolQuery && !ctx.searched && !retriedTool) {
         retriedTool = true;
         try {
           const results = await webSearch(result.toolQuery, 4);
           if (results.length > 0) {
-            sources = results;
-            searched = true;
-            searchStatus = 'ok';
-            searchContext = results
+            ctx.sources = results;
+            ctx.searched = true;
+            ctx.searchStatus = 'ok';
+            ctx.searchContext = results
               .map((s, i) => `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${(s.snippet || '').slice(0, 160)}`)
               .join('\n');
             result = await callWithFallback({
-              system: buildSystemPrompt({ mode, lang, searchContext, searchStatus }),
-              messages,
+              system: buildSystemPrompt({ mode: ctx.mode, lang: ctx.lang, searchContext: ctx.searchContext, searchStatus: ctx.searchStatus }),
+              messages: ctx.messages,
               temperature: 0.7,
-              maxTokens: maxTokensFor(mode),
-              signal: controller.signal
+              maxTokens: maxTokensFor(ctx.mode),
+              signal: controller.signal,
+              providerId
             });
           }
         } catch (e) {
@@ -235,11 +447,12 @@ app.post('/api/chat', async (req, res, next) => {
           const pushMsg =
             'IMPORTANT: Do NOT call or mention any tool and do NOT say you will search/research first. The web search has already been completed (results are in your context if relevant). Answer the user\'s original request DIRECTLY now, in full, without any introduction stub.';
           result = await callWithFallback({
-            system: buildSystemPrompt({ mode, lang, searchContext, searchStatus }),
-            messages: [...messages, { role: 'user', content: pushMsg }],
+            system: buildSystemPrompt({ mode: ctx.mode, lang: ctx.lang, searchContext: ctx.searchContext, searchStatus: ctx.searchStatus }),
+            messages: [...ctx.messages, { role: 'user', content: pushMsg }],
             temperature: 0.7,
-            maxTokens: maxTokensFor(mode),
-            signal: controller.signal
+            maxTokens: maxTokensFor(ctx.mode),
+            signal: controller.signal,
+            providerId
           });
         } catch (e) {
           console.error('force-answer retry failed:', e.message);
@@ -254,40 +467,27 @@ app.post('/api/chat', async (req, res, next) => {
         return res.json({
           reply:
             'Priya ko aapka jawab banate waqt AI service se incomplete response mila — please ek baar phir se poochiye, ya thoda alag tareeke se likhiye. (Priya got an incomplete response from the AI service — please ask again.)',
-          sources,
-          searched,
+          sources: ctx.sources,
+          searched: ctx.searched,
           tool: false,
           provider,
           model,
-          searchStatus,
+          searchStatus: ctx.searchStatus,
           download: null,
           incomplete: true
         });
       }
 
       // CSV / spreadsheet requests: turn any markdown tables in the reply into a .csv download.
-      const csv = wantsCsv ? replyToCsv(text) : null;
       return res.json({
         reply: text,
-        sources,
-        searched,
+        sources: ctx.sources,
+        searched: ctx.searched,
         tool: false,
         provider,
         model,
-        searchStatus,
-        download: wantsDownload
-          ? {
-              filename: `priya-${new Date().toISOString().slice(0, 10)}.md`,
-              content: text,
-              kind: 'md'
-            }
-          : csv
-            ? {
-                filename: `priya-${new Date().toISOString().slice(0, 10)}.csv`,
-                content: csv,
-                kind: 'csv'
-              }
-            : null
+        searchStatus: ctx.searchStatus,
+        download: buildDownload(text, ctx.wantsDownload, ctx.wantsCsv)
       });
     } catch (e) {
       clearTimeout(timer);
@@ -369,8 +569,7 @@ app.use((err, _req, res, _next) => {
   console.error('api error:', err.message);
   if (err.status === 503 && err.code === 'MISSING_KEY') {
     return res.status(503).json({
-      error:
-        'No AI provider is configured on the server. Set GEMINI_API_KEY, SARVAM_API_KEY or GROQ_API_KEY in the server .env file and restart.'
+      error: 'No AI provider is configured on the server. Add an API key in Settings → AI Models & API, or set GEMINI_API_KEY / SARVAM_API_KEY / GROQ_API_KEY in the server .env file and restart.'
     });
   }
   const status = typeof err.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;

@@ -10,6 +10,9 @@ node_modules/
 dist/
 client/dist/
 
+# Server-side provider key store — NEVER commit user API keys
+server/data/
+
 # Logs
 *.log
 npm-debug.log*

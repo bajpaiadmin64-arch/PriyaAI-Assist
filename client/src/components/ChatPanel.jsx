@@ -14,7 +14,8 @@ const SUGGESTIONS = [
 ];
 
 export default function ChatPanel({
-  messages, typing, status, backend, settings, orbState,
+  messages, typing, streamText, status, backend, settings, orbState,
+  providers, selectedProvider, onSelectModel,
   onSend, onNewChat, onClear, onExport, onOpenSettings,
   onToggleVoiceOut, onSpeakLast, onBack, voiceLang, onListeningChange,
   thinkingLabel = 'Priya is thinking…'
@@ -55,12 +56,30 @@ export default function ChatPanel({
               <h2>Priya</h2>
               <div className="status-line">
                 <span className={`status-dot ${status.state === 'off' ? 'off' : ''}`} />
-                <span>{status.label}{backend && backend.ok && !backend.configured ? ' — set GEMINI_API_KEY' : ''}</span>
+                <span>{status.label}{backend && backend.ok && !backend.configured ? ' — add an API key (⚙️)' : ''}</span>
+                {selectedProvider && (
+                  <span className="status-line-sep">·</span>
+                )}
+                {selectedProvider && (
+                  <span className="active-model">{selectedProvider.label}{selectedProvider.model ? ` · ${selectedProvider.model}` : ''}</span>
+                )}
               </div>
             </div>
           </div>
 
           <div className="header-actions">
+            {providers && providers.some((p) => p.configured) && (
+              <select
+                className="model-select"
+                value={(selectedProvider && selectedProvider.provider) || ''}
+                onChange={(e) => onSelectModel(e.target.value)}
+                title="Active AI model — switching keeps this conversation"
+              >
+                {providers.filter((p) => p.configured).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}{p.model ? ` — ${p.model}` : ''}</option>
+                ))}
+              </select>
+            )}
             <span className={`web-indicator ${settings.webSearch ? 'on' : ''}`} title="Web search mode">
               <svg viewBox="0 0 24 24" className="ic"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm7.93 9h-3.02a15.6 15.6 0 0 0-1.35-4.75A8.03 8.03 0 0 1 19.93 11zM12 4c.83 1.2 1.74 3.23 1.96 5H10.04C10.26 7.23 11.17 5.2 12 4zM4.07 13a8.1 8.1 0 0 1 0-2h3.02c-.03.66-.05 1.32-.05 2s.02 1.34.05 2H4.07zm.56 2h3.02c.32 1.7 1.35 3.65 1.35 4.75A8.04 8.04 0 0 1 4.63 15zM12 20c-.83-1.2-1.74-3.23-1.96-5h3.92c-.22 1.77-1.13 3.8-1.96 5zm2.98-5H9.02c-.04-.66-.07-1.32-.07-2s.03-1.34.07-2h5.96c.04.66.07 1.32.07 2s-.03 1.34-.07 2zm-.28 4.75c.83-1.1 1.35-3.05 1.35-4.75h3.02a8.04 8.04 0 0 1-4.37 4.75zM14.94 6.25c-.5 1.1-.87 2.65-1.04 3.75h-3.8c-.17-1.1-.54-2.65-1.04-3.75A8.04 8.04 0 0 1 14.94 6.25z" /></svg>
               Web: {settings.webSearch ? 'On' : 'Off'}
@@ -121,6 +140,18 @@ export default function ChatPanel({
           {messages.map((m, i) => (
             <Message key={i} msg={m} speed={settings.speed} voice={settings.voice} />
           ))}
+
+          {typing && streamText && (
+            <div className="msg priya msg-enter">
+              <PriyaOrb size="sm" state="thinking" />
+              <div className="msg-main">
+                <div className="msg-bubble priya-bubble streaming-bubble">
+                  {streamText}
+                  <span className="stream-caret" />
+                </div>
+              </div>
+            </div>
+          )}
 
           {typing && (
             <div className="msg priya thinking">

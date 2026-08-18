@@ -1,17 +1,20 @@
 'use strict';
 
-const { chatGemini, getModel: geminiModel, hasKey: geminiConfigured } = require('./gemini');
-const { chatSarvam, getModel: sarvamModel, hasKey: sarvamConfigured } = require('./sarvam-llm');
-const { chatCompat } = require('./openai-compat');
+const store = require('./provider-store');
+const { findProvider, defaultOrder } = require('./model-catalog');
+const { chatWith } = require('./provider-system');
 
 /**
  * Provider registry + fallback loop.
  *
- * Chain (default): gemini → sarvam → groq → openrouter → openai
- * - Only providers with a configured key are used.
+ * Providers come from the dynamic store (Settings UI) + environment keys.
+ * Chain order: selected provider first, then stored order / CHAT_PROVIDERS
+ * env / catalog order. Only providers with a configured key are used.
  * - On rate-limit (429) / quota / 5xx / network errors: mark the provider
  *   "in cooldown" for a short time and move to the next one automatically.
  * - Transient failures get one retry with exponential backoff.
+ * - Invalid-key (401/403) errors move on but do NOT mark cooldown; the
+ *   error surfaces so the user can fix the key.
  */
 
 const COOLDOWN_MS = 90 * 1000; // after a 429/5xx, skip this provider for 90s
@@ -19,73 +22,23 @@ const COOLDOWN_MS = 90 * 1000; // after a 429/5xx, skip this provider for 90s
 // In-memory cooldown map (per process). Restart clears it — safe.
 const cooldownUntil = new Map();
 
-function defaultOrder() {
-  return (process.env.CHAT_PROVIDERS || 'gemini,sarvam,groq,openrouter,openai')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 function buildRegistry() {
-  return {
-    gemini: {
-      label: 'Gemini',
-      configured: () => geminiConfigured(),
-      model: () => geminiModel(),
-      call: (o) => chatGemini(o)
-    },
-    sarvam: {
-      label: 'Sarvam AI',
-      configured: () => sarvamConfigured(),
-      model: () => sarvamModel(),
-      call: (o) => chatSarvam(o)
-    },
-    groq: {
-      label: 'Groq',
-      configured: () => !!(process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim()),
-      model: () => process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-      call: (o) =>
-        chatCompat(
-          {
-            label: 'Groq',
-            baseUrl: 'https://api.groq.com/openai/v1',
-            apiKey: process.env.GROQ_API_KEY,
-            model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
-          },
-          o
-        )
-    },
-    openrouter: {
-      label: 'OpenRouter',
-      configured: () => !!(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim()),
-      model: () => process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
-      call: (o) =>
-        chatCompat(
-          {
-            label: 'OpenRouter',
-            baseUrl: 'https://openrouter.ai/api/v1',
-            apiKey: process.env.OPENROUTER_API_KEY,
-            model: process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'
-          },
-          o
-        )
-    },
-    openai: {
-      label: 'OpenAI',
-      configured: () => !!(process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY.trim()),
-      model: () => process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      call: (o) =>
-        chatCompat(
-          {
-            label: 'OpenAI',
-            baseUrl: 'https://api.openai.com/v1',
-            apiKey: process.env.OPENAI_API_KEY,
-            model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
-          },
-          o
-        )
-    }
-  };
+  const reg = {};
+  const ids = store.getOrder();
+  // Also include every catalog provider (for status display), even unconfigured.
+  for (const id of ids) {
+    const entry = findProvider(id);
+    reg[id] = {
+      label: entry ? entry.name : id,
+      configured: () => !!store.getKey(id),
+      model: () => {
+        const row = store.list().find((p) => p.id === id);
+        return (row && row.model) || (entry && entry.models && entry.models[0] && entry.models[0].id) || null;
+      },
+      call: (o) => chatWith(id, o)
+    };
+  }
+  return reg;
 }
 
 const registry = buildRegistry();
@@ -98,7 +51,7 @@ function isTransient(e) {
       e.status === 503 ||
       e.status === 504 ||
       (e.status >= 500 && e.status <= 599) ||
-      /rate.?limit|resource.?exhausted|quota/i.test(e.message || ''))
+      /rate.?limit|resource.?exhausted|quota|unavailable|network/i.test(e.message || ''))
   );
 }
 
@@ -116,7 +69,8 @@ function remainingCooldown(name) {
  * @returns {Array<{name:string, def:object}>}
  */
 function availableProviders() {
-  return defaultOrder()
+  return store
+    .getOrder()
     .filter((name) => registry[name])
     .filter((name) => remainingCooldown(name) === 0)
     .filter((name) => registry[name].configured())
@@ -131,13 +85,29 @@ function availableProviders() {
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens]
  * @param {AbortSignal} [opts.signal]
+ * @param {string} [opts.providerId]  force a specific provider (must be configured)
  * @returns {Promise<{text:string, provider:string, model:string}>}
  * @throws {Error} with a friendly message when ALL providers fail.
  */
-async function callWithFallback({ system, messages, temperature, maxTokens, signal }) {
-  const candidates = availableProviders();
+async function callWithFallback({ system, messages, temperature, maxTokens, signal, providerId }) {
+  let candidates = availableProviders();
+  if (providerId) {
+    const forced = candidates.find((c) => c.name === providerId);
+    if (forced) candidates = [forced];
+    else {
+      // Forced provider not configured/available — fall back to the chain but
+      // surface a clear error if nothing works.
+      const configured = store.getKey(providerId) || providerId === 'custom';
+      if (!configured) {
+        const err = new Error(`The selected model provider is not configured (${providerId}). Add its API key in Settings → AI Models & API.`);
+        err.status = 503;
+        err.code = 'MISSING_KEY';
+        throw err;
+      }
+    }
+  }
   if (candidates.length === 0) {
-    const err = new Error('No AI provider is configured. Set GEMINI_API_KEY, SARVAM_API_KEY or GROQ_API_KEY on the server.');
+    const err = new Error('No AI provider is configured. Add an API key in Settings → AI Models & API, or set GEMINI_API_KEY / SARVAM_API_KEY / GROQ_API_KEY on the server.');
     err.status = 503;
     err.code = 'MISSING_KEY';
     throw err;
@@ -183,7 +153,8 @@ async function callWithFallback({ system, messages, temperature, maxTokens, sign
 
 /** Status for /api/health: every provider in order + configured + model + cooldown. */
 function providerStatus() {
-  return defaultOrder()
+  return store
+    .getOrder()
     .filter((name) => registry[name])
     .map((name) => ({
       name,

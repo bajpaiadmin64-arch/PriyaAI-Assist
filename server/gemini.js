@@ -38,17 +38,21 @@ function friendlyError(status, body) {
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens]
  * @param {AbortSignal} [opts.signal]
+ * @param {object} [cfg]  overrides: {apiKey, model, baseUrl} — used by the provider system
  * @returns {Promise<{text:string}>}
  */
-async function chatGemini({ system, messages, temperature, maxTokens, signal }) {
-  if (!hasKey()) {
+async function chatGemini({ system, messages, temperature, maxTokens, signal }, cfg = {}) {
+  const apiKey = cfg.apiKey || process.env.GEMINI_API_KEY || '';
+  const model = cfg.model || getModel();
+  const base = (cfg.baseUrl || GEMINI_BASE).replace(/\/+$/, '');
+  if (!apiKey) {
     const err = new Error('Gemini API key is not configured on the server.');
     err.status = 503;
     err.code = 'MISSING_KEY';
     throw err;
   }
 
-  const url = `${GEMINI_BASE}/models/${encodeURIComponent(getModel())}:generateContent`;
+  const url = `${base}/models/${encodeURIComponent(model)}:generateContent`;
   const contents = messages.map((m) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: m.content }]
@@ -67,7 +71,7 @@ async function chatGemini({ system, messages, temperature, maxTokens, signal }) 
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(body),
       signal
     });
@@ -107,7 +111,7 @@ async function chatGemini({ system, messages, temperature, maxTokens, signal }) 
     throw err;
   }
 
-  return { text, model: getModel() };
+  return { text, model };
 }
 
 module.exports = { chatGemini, getModel, hasKey };

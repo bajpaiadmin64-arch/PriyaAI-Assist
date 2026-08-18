@@ -4,7 +4,7 @@ import Landing from './components/Landing.jsx';
 import ChatPanel from './components/ChatPanel.jsx';
 import SettingsModal from './components/SettingsModal.jsx';
 import { toast } from './components/Message.jsx';
-import { fetchHealth, sendChat } from './api.js';
+import { fetchHealth, sendChat, fetchProviders, selectProvider } from './api.js';
 import { detectLang } from './lang.js';
 import { speak, stopSpeaking, isSpeaking, startBargeIn, stopBargeIn } from './voice.js';
 
@@ -55,6 +55,9 @@ export default function App() {
   const [typing, setTyping] = React.useState(false);
   const [status, setStatus] = React.useState({ state: 'connecting', label: 'Connecting…' });
   const [backend, setBackend] = React.useState(null); // {ok, model, configured}
+  const [providers, setProviders] = React.useState(null); // list from /api/providers
+  const [selectedProvider, setSelectedProvider] = React.useState(null); // {provider, model, label}
+  const [streamLive, setStreamLive] = React.useState(''); // partial streaming reply
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [view, setView] = React.useState('landing'); // 'landing' | 'chat'
   const [micListening, setMicListening] = React.useState(false);
@@ -86,7 +89,7 @@ export default function App() {
     return () => mq.removeEventListener('change', apply);
   }, [settings.theme]);
 
-  // health check
+  // health check + provider list + active selection
   React.useEffect(() => {
     (async () => {
       try {
@@ -97,8 +100,41 @@ export default function App() {
         setBackend({ ok: false });
         setStatus({ state: 'off', label: 'Backend offline' });
       }
+      try {
+        const p = await fetchProviders();
+        setProviders(p.providers);
+        const sel = p.providers.find((x) => x.selected);
+        if (sel) setSelectedProvider({ provider: sel.id, model: sel.model, label: sel.name });
+      } catch (e) { /* providers list optional */ }
     })();
   }, []);
+
+  // keep provider list + selection in sync after settings changes
+  const handleProviderChanged = React.useCallback((data) => {
+    setProviders(data.providers);
+    const sel = data.providers.find((x) => x.selected);
+    if (sel) setSelectedProvider({ provider: sel.id, model: sel.model, label: sel.name });
+  }, []);
+
+  const switchModel = async (id) => {
+    if (id === (selectedProvider && selectedProvider.provider)) return;
+    try {
+      const r = await selectProvider(id);
+      setSelectedProvider({ provider: r.provider, model: r.model, label: r.label });
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `🔀 Switched to **${r.label}** (${r.model}). I will continue this conversation right where we left off.`,
+          time: timeStr(),
+          note: true
+        }
+      ]);
+      toast('Model switched');
+    } catch (e) {
+      toast(e.message);
+    }
+  };
 
   // global code-copy delegation
   React.useEffect(() => {
@@ -216,16 +252,23 @@ export default function App() {
     setMessages(newHistory);
 
     setStatus({ state: 'busy', label: pendingSearchRef.current ? 'Searching the web…' : 'Thinking…' });
+    setStreamLive('');
 
     try {
+      // Streaming first: the selected model answers token-by-token when it
+      // supports it. On any failure the API helper silently retries with the
+      // plain JSON path, so the chat is never broken.
       const res = await sendChat({
         message: text,
         // Token diet: send only the most recent turns.
         history: messages.slice(-12).map((m) => ({ role: m.role, content: m.content })),
         mode: settings.mode,
         useWebSearch: settings.webSearch,
-        lang
+        lang,
+        stream: true,
+        onDelta: (d) => setStreamLive((prev) => prev + d)
       });
+      setStreamLive('');
       const priyaMsg = {
         role: 'assistant',
         content: res.reply,
@@ -253,6 +296,7 @@ export default function App() {
         speak(res.reply, lang, { speed: settings.speed, voice: settings.voice });
       }
     } catch (err) {
+      setStreamLive('');
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', content: '⚠️ ' + (err.message || 'Something went wrong.'), time: timeStr(), lang, error: true }
@@ -272,6 +316,7 @@ export default function App() {
   const clearChat = () => {
     if (messages.length && !window.confirm('Clear the whole conversation?')) return;
     setMessages([]);
+    setStreamLive('');
     stopSpeaking();
     stopBargeIn();
     setStatus({ state: 'ready', label: backend && backend.ok ? 'Online' : 'Backend offline' });
@@ -279,6 +324,7 @@ export default function App() {
 
   const newChat = () => {
     setMessages([]);
+    setStreamLive('');
     stopSpeaking();
     stopBargeIn();
   };
@@ -338,7 +384,7 @@ export default function App() {
   };
 
   const statusLabel =
-    (status.label || '') + (backend && backend.ok && !backend.configured ? ' — set GEMINI_API_KEY' : '');
+    (status.label || '') + (backend && backend.ok && !backend.configured ? ' — add an API key (⚙️ Settings)' : '');
 
   const thinkingLabel = pendingSearchRef.current ? '🌐 Searching the web…' : 'Priya is thinking…';
 
@@ -358,10 +404,14 @@ export default function App() {
         <ChatPanel
           messages={messages}
           typing={typing}
+          streamText={streamLive}
           status={status}
           backend={backend}
           settings={settings}
           orbState={orbState}
+          providers={providers}
+          selectedProvider={selectedProvider}
+          onSelectModel={switchModel}
           onSend={send}
           onNewChat={newChat}
           onClear={clearChat}
@@ -381,6 +431,7 @@ export default function App() {
         settings={settings}
         onChange={setSettings}
         onClose={() => setSettingsOpen(false)}
+        onProviderChanged={handleProviderChanged}
       />
     </div>
   );

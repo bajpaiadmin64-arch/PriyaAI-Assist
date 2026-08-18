@@ -20,8 +20,23 @@ async function copyText(text) {
   }
 }
 
+const PROVIDER_LABELS = {
+  gemini: 'Gemini', sarvam: 'Sarvam AI', openai: 'OpenAI', anthropic: 'Claude',
+  xai: 'Grok', deepseek: 'DeepSeek', mistral: 'Mistral', groq: 'Groq',
+  openrouter: 'OpenRouter', together: 'Together AI', cerebras: 'Cerebras',
+  huggingface: 'Hugging Face', perplexity: 'Perplexity', custom: 'Custom model'
+};
+
 export default function Message({ msg, speed = 'normal', voice = 'priya' }) {
   const isUser = msg.role === 'user';
+
+  if (msg.note) {
+    return (
+      <div className="msg-note msg-enter">
+        <Markdown text={msg.content} />
+      </div>
+    );
+  }
   const [speakingState, setSpeakingState] = React.useState(false);
 
   React.useEffect(() => {
@@ -75,9 +90,9 @@ export default function Message({ msg, speed = 'normal', voice = 'priya' }) {
         )}
 
         {!isUser && msg.searched && <div className="info-updated">✓ Information updated</div>}
-        {!isUser && msg.provider && (
+        {!isUser && msg.provider && msg.provider !== 'tool' && (
           <div className="provider-chip">
-            ⚡ Priya is using {msg.provider === 'gemini' ? 'Gemini' : 'an alternate model'}
+            ⚡ {PROVIDER_LABELS[msg.provider] || msg.provider}
             {msg.model ? ` (${msg.model})` : ''}
           </div>
         )}

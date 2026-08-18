@@ -11,6 +11,7 @@
 const { callWithFallback, availableProviders } = require('./providers');
 
 process.env.CHAT_PROVIDERS = 'gemini,groq,openrouter';
+process.env.PRIYA_STORE_DISABLED = '1';
 
 function json(status, obj) {
   return {

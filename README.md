@@ -2,6 +2,8 @@
 
 **Priya** is your personal female AI technology expert. She speaks **Hindi, English and Hinglish**, helps with web development, hosting, Git, databases, AI tools and computer troubleshooting — and she is honest: **Accuracy > Agreement**. She will tell you when you are wrong and will never pretend to know something she doesn't.
 
+Priya is **model-independent**: add your own API key for any supported provider (Gemini, OpenAI, Claude, Grok, DeepSeek, Mistral, Groq, OpenRouter, Together, Cerebras, Hugging Face, Perplexity, Sarvam or any OpenAI-compatible custom endpoint), test it, and switch models mid-conversation without losing a single message.
+
 ## Architecture
 
 ```
@@ -11,31 +13,42 @@ Priya AI Frontend (React + Vite)
  ↓
 Backend /api/chat (Node.js + Express)
  ↓
-Gemini API (Google)
+AI Provider Manager → Model Adapter → Selected AI Model
  ↓
 Backend → Frontend → User
 ```
 
-The **API key lives only on the server** (environment variable). It is never sent to the browser and never committed to the repository.
+**API keys live only on the server.** Keys added from the UI are stored in `server/data/providers.json` (gitignored, never committed); environment-variable keys (`GEMINI_API_KEY`, etc.) keep working and appear read-only. Keys are always masked in the UI and never sent back to the browser, never logged, never appear in error messages.
 
 | Layer | Tech |
 |---|---|
 | Frontend | React 19 + Vite 8 (`client/`) |
 | Backend | Node.js + Express (`server/`) — no frameworks beyond Express |
-| AI model | Sarvam `sarvam-105b` (Indian-first, native Hindi) or Gemini `gemini-3.5-flash` when its key is set |
+| AI models | 13 pre-configured providers + unlimited custom OpenAI-compatible endpoints (`server/model-catalog.js`) |
+| Model adapters | OpenAI-compatible · Gemini · Anthropic · Sarvam (`server/provider-system.js`) |
+| Key storage | Server-side file + env merge, masked API (`server/provider-store.js`) |
+| Streaming | SSE token-by-token replies where the model supports it, automatic JSON fallback |
 | Live web search | Server-side (Tavily when key set → Bing → DuckDuckGo) |
 
 ## Features
 
-- 💬 **Hindi / English / Hinglish** — Priya detects your language and replies in it
-- 🎙️ **Voice input** (mic, Web Speech API) + 🔊 **voice replies** (female voice)
+- 💬 **Hindi / English / Hinglish** — Priya detects your language and replies in it (every model)
+- 🎙️ **Voice input** (mic, Web Speech API) + 🔊 **voice replies** (female voice) — works with any selected model
 - ⏸️ **Interruptible conversation (barge-in)** — Priya keeps listening while she speaks; say **"Ruko!"** or just start talking and she stops instantly, waits for your full sentence, then answers
 - ⚙️ **Simple / Balanced / Tech** modes
+- 🧠 **AI Models & API** (Settings) — 13 pre-configured providers + custom OpenAI-compatible endpoints:
+  - add/edit/delete your own API key per provider (server-side storage, masked, never exposed)
+  - per-model catalog with context limits, vision/tools/streaming capability flags
+  - **Test Connection** for every provider — real request, real error classification (auth / rate limit / invalid model / endpoint / network)
+  - **Use Model** sets the active model; the model selector in the chat header switches instantly
+  - switching models **never clears the conversation or task state** — the new model continues with the full context
+  - smart fallback: active model first; on 429/timeout/outage the next configured provider answers automatically; invalid keys are reported, never retried in a loop
+  - per-model context trimming: history is cut to fit the selected model's window before every call
 - 🔎 **Live web search** with source links + "✓ Information updated" indicator for current-information questions
 - 🧮 **Calculator tool** (`!calc 1245*87` or just type a math expression)
 - 🌐 **Page reader tool** (`!open https://…` to read a public page's current content)
 - 📄 **Report download** — ask Priya to "create a report" and she saves it as a file
-- ⚡ **AI limits & fallback system** — up to 5 providers (Gemini → Sarvam → Groq → OpenRouter → OpenAI, configurable via `CHAT_PROVIDERS`). Rate-limited/failing providers are cooled down for 90s and Priya switches automatically; every call retries once with backoff. Token diet (bounded history, mode-based output caps, small search context) keeps free-tier usage low. Live provider status + free-key instructions inside Settings → AI providers.
+- ⚡ **AI limits & fallback system** — configured providers are tried in order; rate-limited/failing providers are cooled down for 90s and Priya switches automatically; every call retries once with backoff. Token diet (bounded history, mode-based output caps, small search context) keeps free-tier usage low. Live provider status inside Settings → AI Models & API.
 - 📎 **File attachment** — attach `.txt/.md/.csv/.json/.log/.js/.jsx/.ts/.tsx/.html/.css/.py/.sh/.yml/.yaml` (up to 50 KB) and ask Priya to summarize, fix, or convert it
 - 📊 **CSV / spreadsheet downloads** — ask for a table/CSV/spreadsheet and the reply downloads as a `.csv` file
 - 🔎 **Reliable research** — add the free Tavily key (`TAVILY_API_KEY`, 1,000 searches/mo, no credit card) and search results come from a proper search API with SEO junk filtered; without a key, keyless engines (Bing/DuckDuckGo) still work but many public engines now block keyless scraping, so research answers may be limited — Priya says so honestly instead of inventing facts.
@@ -89,6 +102,10 @@ npm run dev:client
 
 Open http://localhost:5173
 
+### Adding models without touching code
+
+Open **Settings → AI Models & API**: every supported provider lists its models with context/capability info. Paste a key, hit **Test Connection**, then **Save**. The chat header dropdown shows all configured models — switching keeps the whole conversation. Custom OpenAI-compatible endpoints (local LLMs, private gateways) work through **+ Add Custom AI Provider** (name + base URL + model + key).
+
 ### Production build + run
 
 ```bash
@@ -100,11 +117,19 @@ npm start         # serves API + built frontend on PORT (default 3000)
 
 | Variable | Required | Description |
 |---|---|---|
-| `GEMINI_API_KEY` | ⚪ | Google Gemini API key (free tier) — get one at https://aistudio.google.com/apikey |
 | `SARVAM_API_KEY` | ✅ | Sarvam AI key (chat + voice) — https://dashboard.sarvam.ai |
+| `GEMINI_API_KEY` | ⚪ | Google Gemini API key (free tier) — https://aistudio.google.com/apikey |
 | `GROQ_API_KEY` | ⚪ | Groq API key (free, no card) — https://console.groq.com/keys |
 | `OPENROUTER_API_KEY` | ⚪ | OpenRouter key for free/other models — https://openrouter.ai/keys |
 | `OPENAI_API_KEY` | ⚪ | OpenAI API key (paid) — https://platform.openai.com/api-keys |
+| `ANTHROPIC_API_KEY` | ⚪ | Claude API key — https://console.anthropic.com/settings/keys |
+| `XAI_API_KEY` | ⚪ | xAI Grok key — https://console.x.ai |
+| `DEEPSEEK_API_KEY` | ⚪ | DeepSeek key — https://platform.deepseek.com/api_keys |
+| `MISTRAL_API_KEY` | ⚪ | Mistral key — https://console.mistral.ai/api-keys |
+| `TOGETHER_API_KEY` | ⚪ | Together AI key — https://api.together.ai/settings/api-keys |
+| `CEREBRAS_API_KEY` | ⚪ | Cerebras key — https://cloud.cerebras.ai |
+| `HF_API_KEY` | ⚪ | Hugging Face token (Inference permission) — https://huggingface.co/settings/tokens |
+| `PERPLEXITY_API_KEY` | ⚪ | Perplexity key — https://www.perplexity.ai/settings/api |
 | `GEMINI_MODEL` | ❌ | Override Gemini model, e.g. `gemini-3.5-flash` |
 | `GROQ_MODEL` | ❌ | Override Groq model (default `llama-3.3-70b-versatile`) |
 | `SARVAM_LLM_MODEL` | ❌ | Override Sarvam model (default `sarvam-105b`) |
@@ -112,9 +137,9 @@ npm start         # serves API + built frontend on PORT (default 3000)
 | `TAVILY_API_KEY` | ⚪ | Free web-search key (1,000 searches/mo, no card) — https://app.tavily.com. Without it Priya uses keyless engines. |
 | `PORT` | ❌ | Backend port (Render sets it automatically) |
 
-Priya only uses providers whose key is set, and never leaks keys. Free tiers are metered: on a rate limit Priya cools that provider down and switches automatically, so a single provider being exhausted never blocks the chat.
+Every provider key can alternatively be entered at runtime from **Settings → AI Models & API** — stored server-side in `server/data/providers.json` (gitignored) with no code change or restart. Env keys and stored keys merge; a stored key overrides the env key for the same provider. Priya only uses providers whose key is set, and never leaks keys. Free tiers are metered: on a rate limit Priya cools that provider down and switches automatically, so a single provider being exhausted never blocks the chat.
 
-Never commit `.env`. It is ignored by `.gitignore`.
+Never commit `.env` or `server/data/`. Both are ignored by `.gitignore`.
 
 ## API
 

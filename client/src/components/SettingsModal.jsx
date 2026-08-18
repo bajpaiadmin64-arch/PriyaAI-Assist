@@ -1,10 +1,43 @@
 import React from 'react';
+import {
+  fetchProviders,
+  testProvider,
+  saveProviderKey,
+  deleteProviderKey,
+  selectProvider
+} from '../api.js';
+import { toast } from './Message.jsx';
 
-const MODELS = ['sarvam-105b', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];
+const STATUS_DOT = {
+  selected: 'on',
+  configured: 'on-dim',
+  none: ''
+};
 
-export default function SettingsModal({ open, settings, onChange, onClose }) {
+function maskHint(provider) {
+  if (!provider.configured) return '🔒 API key required';
+  return `${provider.source === 'env' ? 'env' : 'saved'} · ${provider.maskedKey}`;
+}
+
+export default function SettingsModal({ open, settings, onChange, onClose, onProviderChanged }) {
   const [voicesInfo, setVoicesInfo] = React.useState(null);
-  const [providers, setProviders] = React.useState(null);
+  const [providersData, setProvidersData] = React.useState(null); // {providers, selected, order}
+  const [editing, setEditing] = React.useState(null); // {id, apiKey, model, baseUrl, name, showBaseUrl}
+  const [testingId, setTestingId] = React.useState(null);
+  const [testResult, setTestResult] = React.useState(null); // {providerId, ok, message}
+  const [customOpen, setCustomOpen] = React.useState(false);
+  const [custom, setCustom] = React.useState({ name: '', baseUrl: '', model: '', apiKey: '' });
+  const [busy, setBusy] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const data = await fetchProviders();
+      setProvidersData(data);
+      if (onProviderChanged) onProviderChanged(data);
+    } catch (e) {
+      setProvidersData(null);
+    }
+  }, [onProviderChanged]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -18,17 +51,10 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
       } catch (e) {
         if (alive) setVoicesInfo(null);
       }
-      try {
-        const res = await fetch('/api/health');
-        if (!res.ok) throw new Error('no health');
-        const data = await res.json();
-        if (alive) setProviders(data.providers || null);
-      } catch (e) {
-        if (alive) setProviders(null);
-      }
     })();
+    refresh();
     return () => { alive = false; };
-  }, [open]);
+  }, [open, refresh]);
 
   if (!open) return null;
 
@@ -37,6 +63,108 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
   const sarvamOn = !!(voicesInfo && voicesInfo.providers && voicesInfo.providers.sarvam && voicesInfo.providers.sarvam.configured);
   const elevenOn = !!(voicesInfo && voicesInfo.providers && voicesInfo.providers.elevenlabs && voicesInfo.providers.elevenlabs.configured);
   const voices = (voicesInfo && voicesInfo.voices) || [];
+
+  const startEdit = (p) => {
+    setTestResult(null);
+    setEditing({
+      id: p.id,
+      apiKey: '',
+      model: p.model || (p.models && p.models[0] ? p.models[0].id : ''),
+      baseUrl: p.baseUrl || '',
+      name: p.name === 'Custom (OpenAI-compatible)' ? '' : p.name,
+      showBaseUrl: p.id === 'custom'
+    });
+  };
+
+  const runTest = async (p, values) => {
+    setTestingId(p.id);
+    setTestResult(null);
+    try {
+      const r = await testProvider({
+        providerId: p.id,
+        apiKey: values.apiKey || undefined,
+        model: values.model || undefined,
+        baseUrl: values.baseUrl || undefined,
+        name: values.name || undefined
+      });
+      setTestResult({ providerId: p.id, ok: r.ok, message: r.message + (r.latencyMs ? ` (${r.latencyMs} ms)` : '') });
+    } catch (e) {
+      setTestResult({ providerId: p.id, ok: false, message: e.message });
+    } finally {
+      setTestingId(null);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    setBusy(true);
+    try {
+      await saveProviderKey({
+        providerId: editing.id,
+        apiKey: editing.apiKey,
+        model: editing.model,
+        baseUrl: editing.showBaseUrl ? editing.baseUrl : undefined,
+        name: editing.name
+      });
+      toast('API key saved');
+      setEditing(null);
+      await refresh();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeKey = async (p) => {
+    if (!window.confirm(`Remove the ${p.name} API key?`)) return;
+    try {
+      await deleteProviderKey(p.id);
+      toast('API key removed');
+      await refresh();
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+
+  const useModel = async (p) => {
+    try {
+      const r = await selectProvider(p.id);
+      toast(`Now using ${r.label} (${r.model})`);
+      await refresh();
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+
+  const saveCustom = async () => {
+    if (!custom.name.trim() || !custom.baseUrl.trim() || !custom.model.trim()) {
+      toast('Provider name, Base URL and Model are required.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await saveProviderKey({
+        providerId: 'custom',
+        apiKey: custom.apiKey,
+        model: custom.model.trim(),
+        baseUrl: custom.baseUrl.trim(),
+        name: custom.name.trim()
+      });
+      toast('Custom provider saved');
+      setCustomOpen(false);
+      setCustom({ name: '', baseUrl: '', model: '', apiKey: '' });
+      await refresh();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const providers = (providersData && providersData.providers) || [];
+
+  const editingProvider = editing ? providers.find((p) => p.id === editing.id) : null;
 
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -49,62 +177,166 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
         </div>
 
         <div className="modal-body">
-          <div className="field">
-            <label htmlFor="model">AI model</label>
-            <input id="model" type="text" value={settings.model} onChange={(e) => set({ model: e.target.value })} />
-            <div className="model-presets">
-              {MODELS.map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  className={`model-chip ${settings.model === m ? 'active' : ''}`}
-                  onClick={() => set({ model: m })}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-            <p className="field-hint">Sarvam-105B (Indian languages) is used when no Gemini key is set. The server picks the best available model.</p>
-          </div>
-
-          {/* ------- AI providers ------- */}
+          {/* ------- AI Models & API ------- */}
           <div className="field providers-field">
-            <label>AI providers</label>
-            {providers ? (
+            <label>AI Models &amp; API</label>
+            {providers.length === 0 ? (
+              <p className="field-hint">Loading provider list…</p>
+            ) : (
               <>
                 {providers.map((p) => (
-                  <div key={p.name} className="provider-row">
-                    <span className={`vs-dot ${p.configured ? 'on' : ''}`} />
+                  <div key={p.id} className={`provider-row ${p.selected ? 'selected' : ''}`}>
+                    <span className={`vs-dot ${p.selected ? 'on' : p.configured ? 'on-dim' : ''}`} />
                     <div className="provider-info">
-                      <strong>{p.label}</strong>
+                      <strong>{p.name} {p.selected ? <span className="badge">active</span> : null}</strong>
                       <span className="provider-meta">
-                        {p.configured ? `${p.model}` : 'not configured'}
-                        {p.cooldownSec > 0 ? ` · cooling down ${p.cooldownSec}s after rate limit` : ''}
+                        {p.configured
+                          ? `${maskHint(p)}${p.model ? ' · ' + p.model : ''}`
+                          : '🔒 API key required'}
+                        {p.cooldownSec > 0 ? <span className="rate-warn"> ⚠ rate limited ({p.cooldownSec}s)</span> : ''}
                       </span>
+                    </div>
+                    <div className="provider-actions">
+                      {p.configured && (
+                        <button type="button" className="mini-btn" disabled={p.selected} onClick={() => useModel(p)}>
+                          {p.selected ? 'Active' : 'Use Model'}
+                        </button>
+                      )}
+                      <button type="button" className="mini-btn" onClick={() => startEdit(p)}>
+                        {p.configured ? 'Edit Key' : 'Add API Key'}
+                      </button>
+                      {p.configured && p.source === 'user' && (
+                        <button type="button" className="mini-btn danger" onClick={() => removeKey(p)} title="Delete API key">🗑</button>
+                      )}
                     </div>
                   </div>
                 ))}
-                <p className="field-hint">
-                  Priya auto-switches when one provider hits its free limit. Add keys in the server&apos;s{' '}
-                  <code>.env</code> file:
-                </p>
-                <ul className="provider-list">
-                  <li><strong>Gemini</strong> — free tier · <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">aistudio.google.com/apikey</a> → Create API key. Env: <code>GEMINI_API_KEY</code></li>
-                  <li><strong>Groq</strong> — free, no card · <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a>. Env: <code>GROQ_API_KEY</code></li>
-                  <li><strong>Sarvam AI</strong> — Indian languages · <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer">dashboard.sarvam.ai</a>. Env: <code>SARVAM_API_KEY</code></li>
-                  <li><strong>OpenRouter</strong> — free models · <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">openrouter.ai/keys</a>. Env: <code>OPENROUTER_API_KEY</code></li>
-                  <li><strong>Tavily (web search)</strong> — free 1,000 searches/mo, no card · <a href="https://app.tavily.com" target="_blank" rel="noreferrer">app.tavily.com</a>. Env: <code>TAVILY_API_KEY</code> (without it, keyless search works but is less reliable)</li>
-                </ul>
-              </>
-            ) : (
-              <p className="field-hint">Checking provider status…</p>
-            )}
-          </div>
 
-          <div className="field">
-            <label htmlFor="temp">Creativity <span className="temp-val">{settings.temp}</span></label>
-            <input id="temp" type="range" min="0" max="1" step="0.05" value={settings.temp}
-              onChange={(e) => set({ temp: parseFloat(e.target.value) })} />
+                {/* inline key editor */}
+                {editing && editingProvider && (
+                  <div className="provider-edit">
+                    <strong>Configure {editingProvider.name}</strong>
+                    <div className="field">
+                      <label>API Key</label>
+                      <input
+                        type="password"
+                        value={editing.apiKey}
+                        placeholder={editingProvider.configured ? 'Leave empty to keep the saved key' : 'Paste your API key'}
+                        onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
+                      />
+                      <p className="field-hint">Stored on the server only — never shown in full, never sent to the browser.</p>
+                    </div>
+                    <div className="field">
+                      <label>Model</label>
+                      {editingProvider.models && editingProvider.models.length ? (
+                        <select
+                          className="voice-select"
+                          value={editing.model || ''}
+                          onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                        >
+                          {editingProvider.models.map((m) => (
+                            <option key={m.id} value={m.id}>{m.name} — {m.id}{m.notes ? ` (${m.notes})` : ''}</option>
+                          ))}
+                          {!editingProvider.models.some((m) => m.id === editing.model) && editing.model ? (
+                            <option value={editing.model}>{editing.model} (custom)</option>
+                          ) : null}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          value={editing.model}
+                          placeholder={editingProvider.id === 'openrouter' ? 'e.g. google/gemini-2.5-flash:free — any model ID works' : 'Model ID'}
+                          onChange={(e) => setEditing({ ...editing, model: e.target.value })}
+                        />
+                      )}
+                      {editingProvider.id === 'openrouter' && editingProvider.models && editingProvider.models.length ? (
+                        <p className="field-hint">Many models are free (…:free). The full live list appears on the provider&apos;s site with this key.</p>
+                      ) : null}
+                    </div>
+                    {(editingProvider.id === 'custom' || editing.showBaseUrl) && (
+                      <div className="field">
+                        <label>Base URL</label>
+                        <input
+                          type="text"
+                          value={editing.baseUrl}
+                          placeholder="https://your-endpoint.example/v1"
+                          onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })}
+                        />
+                      </div>
+                    )}
+                    {editingProvider.id === 'custom' && (
+                      <div className="field">
+                        <label>Provider name</label>
+                        <input
+                          type="text"
+                          value={editing.name || ''}
+                          placeholder="My Custom Provider"
+                          onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                        />
+                      </div>
+                    )}
+                    <div className="provider-edit-actions">
+                      <button type="button" className="mini-btn" disabled={busy || testingId === editingProvider.id} onClick={() => runTest(editingProvider, editing)}>
+                        {testingId === editingProvider.id ? 'Testing…' : 'Test Connection'}
+                      </button>
+                      <button type="button" className="mini-btn primary" disabled={busy} onClick={saveEdit}>Save</button>
+                      <button type="button" className="mini-btn" onClick={() => setEditing(null)}>Cancel</button>
+                    </div>
+                    {testResult && testResult.providerId === editingProvider.id && (
+                      <p className={`test-result ${testResult.ok ? 'ok' : 'fail'}`}>
+                        {testResult.ok ? '✓ Connection successful' : '✕ Connection failed'} — {testResult.message}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* custom provider */}
+                {!customOpen ? (
+                  <button type="button" className="mini-btn wide" onClick={() => setCustomOpen(true)}>+ Add Custom AI Provider</button>
+                ) : (
+                  <div className="provider-edit">
+                    <strong>Add Custom AI Provider (OpenAI-compatible)</strong>
+                    <div className="field">
+                      <label>Provider name</label>
+                      <input type="text" value={custom.name} placeholder="My Provider" onChange={(e) => setCustom({ ...custom, name: e.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>Base URL</label>
+                      <input type="text" value={custom.baseUrl} placeholder="https://example.com/v1" onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>Model name</label>
+                      <input type="text" value={custom.model} placeholder="my-model" onChange={(e) => setCustom({ ...custom, model: e.target.value })} />
+                    </div>
+                    <div className="field">
+                      <label>API key</label>
+                      <input type="password" value={custom.apiKey} placeholder="Optional for local servers" onChange={(e) => setCustom({ ...custom, apiKey: e.target.value })} />
+                    </div>
+                    <div className="provider-edit-actions">
+                      <button type="button" className="mini-btn" disabled={busy || testingId === 'custom'} onClick={() => runTest({ id: 'custom', name: custom.name || 'Custom' }, custom)}>
+                        {testingId === 'custom' ? 'Testing…' : 'Test Connection'}
+                      </button>
+                      <button type="button" className="mini-btn primary" disabled={busy} onClick={saveCustom}>Save</button>
+                      <button type="button" className="mini-btn" onClick={() => setCustomOpen(false)}>Cancel</button>
+                    </div>
+                    {testResult && testResult.providerId === 'custom' && (
+                      <p className={`test-result ${testResult.ok ? 'ok' : 'fail'}`}>
+                        {testResult.ok ? '✓ Connection successful' : '✕ Connection failed'} — {testResult.message}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <p className="field-hint">
+                  <strong>Fallback order:</strong> the active model is tried first; if it hits a rate limit, timeout or outage,
+                  Priya automatically switches to the next configured provider. Invalid API keys are reported — they are never retried in a loop.
+                </p>
+                <p className="field-hint">
+                  Keys you add here are stored on the server (never committed to GitHub, never shown in full).
+                  Keys set via environment variables (Render/&nbsp;.env) appear as <code>env</code> and cannot be edited from here.
+                </p>
+              </>
+            )}
           </div>
 
           {/* ------- Voice ------- */}

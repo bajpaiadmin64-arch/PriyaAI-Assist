@@ -38,17 +38,21 @@ function friendlyError(status, body) {
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens]
  * @param {AbortSignal} [opts.signal]
+ * @param {object} [cfg]  overrides: {apiKey, model, baseUrl} — used by the provider system
  * @returns {Promise<{text:string, model:string, requestedTool?:string, toolQuery?:string}>}
  */
-async function chatSarvam({ system, messages, temperature, maxTokens, signal }) {
-  if (!hasKey()) {
+async function chatSarvam({ system, messages, temperature, maxTokens, signal }, cfg = {}) {
+  const apiKey = cfg.apiKey || process.env.SARVAM_API_KEY || '';
+  const model = cfg.model || getModel();
+  const base = (cfg.baseUrl || SARVAM_BASE).replace(/\/+$/, '');
+  if (!apiKey) {
     const err = new Error('Sarvam API key is not configured on the server.');
     err.status = 503;
     err.code = 'MISSING_KEY';
     throw err;
   }
 
-  const url = `${SARVAM_BASE}/v1/chat/completions`;
+  const url = `${base}/v1/chat/completions`;
   const chatMessages = [
     { role: 'system', content: system },
     ...messages.map((m) => ({
@@ -58,7 +62,7 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
   ];
 
   const body = {
-    model: getModel(),
+    model,
     messages: chatMessages,
     temperature: typeof temperature === 'number' ? temperature : 0.7
   };
@@ -75,7 +79,7 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'api-subscription-key': process.env.SARVAM_API_KEY
+        'api-subscription-key': apiKey
       },
       body: JSON.stringify(body),
       signal
@@ -113,7 +117,7 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
     const cleaned = raw.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
     return {
       text: cleaned || 'Let me search the web for that.',
-      model: getModel(),
+      model,
       requestedTool: toolMatch[1].toLowerCase(),
       toolQuery: toolMatch[3].trim()
     };
@@ -128,7 +132,7 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
     throw err;
   }
 
-  return { text, model: getModel() };
+  return { text, model };
 }
 
 module.exports = { chatSarvam, getModel, hasKey };
