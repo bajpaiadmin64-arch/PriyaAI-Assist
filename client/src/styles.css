@@ -1351,6 +1351,53 @@ a { color: var(--primary); text-decoration: none; }
 }
 .send-btn { color: var(--primary); }
 .send-btn:not(:disabled):hover { background: var(--primary-soft); }
+
+/* ---------- Attach file (composer) ---------- */
+.attach-btn { color: var(--faint); }
+.attach-btn.has-file { color: var(--primary); }
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  border: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--text);
+}
+.attach-size { color: var(--faint); }
+.attach-x {
+  border: none;
+  background: transparent;
+  color: var(--faint);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.attach-x:hover { color: var(--bad); }
+
+/* ---------- File chip inside user message ---------- */
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .input-note {
   margin-top: 8px;
   padding-left: 8px;

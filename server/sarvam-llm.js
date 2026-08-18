@@ -38,7 +38,7 @@ function friendlyError(status, body) {
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens]
  * @param {AbortSignal} [opts.signal]
- * @returns {Promise<{text:string, model:string}>}
+ * @returns {Promise<{text:string, model:string, requestedTool?:string, toolQuery?:string}>}
  */
 async function chatSarvam({ system, messages, temperature, maxTokens, signal }) {
   if (!hasKey()) {
@@ -63,8 +63,11 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
     temperature: typeof temperature === 'number' ? temperature : 0.7
   };
   // sarvam-105b is a reasoning model: it spends output budget on hidden
-  // chain-of-thought, so give it extra room above the answer cap.
-  if (maxTokens) body.max_tokens = maxTokens + 768;
+  // chain-of-thought. Low reasoning effort keeps that burn small (verified:
+  // 'low' cuts the CoT drastically), and the answer budget is padded so
+  // replies never get cut off mid-sentence (finish_reason=length).
+  body.reasoning_effort = 'low';
+  body.max_tokens = maxTokens ? maxTokens + 2048 : 4096;
 
   let res;
   try {
@@ -93,12 +96,31 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
     throw err;
   }
 
-  const text =
+  const raw =
     (data.choices &&
       data.choices[0] &&
       data.choices[0].message &&
       data.choices[0].message.content) ||
     '';
+
+  // Sarvam-105b sometimes emits its tool call as plain text markup
+  // (<tool_call>live_web_search ... </tool_call>) instead of answering.
+  // Detect it, strip it, and signal the server to run the real web search
+  // and retry once with the results in context.
+  const toolCallRe = /<tool_call>\s*([a-z_0-9]+)\s*<arg_key>\s*([a-z_0-9]+)\s*<\/arg_key>\s*<arg_value>\s*([\s\S]*?)\s*<\/arg_value>\s*<\/tool_call>/i;
+  const toolMatch = raw.match(toolCallRe);
+  if (toolMatch && /search/i.test(toolMatch[1]) && /query/i.test(toolMatch[2])) {
+    const cleaned = raw.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
+    return {
+      text: cleaned || 'Let me search the web for that.',
+      model: getModel(),
+      requestedTool: toolMatch[1].toLowerCase(),
+      toolQuery: toolMatch[3].trim()
+    };
+  }
+
+  // Strip any leftover tool-call markup so users never see raw tags.
+  const text = raw.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
 
   if (!text || !text.trim()) {
     const err = new Error('Priya could not generate a response. Please rephrase your message.');
@@ -106,7 +128,7 @@ async function chatSarvam({ system, messages, temperature, maxTokens, signal }) 
     throw err;
   }
 
-  return { text: text.trim(), model: getModel() };
+  return { text, model: getModel() };
 }
 
 module.exports = { chatSarvam, getModel, hasKey };

@@ -185,19 +185,33 @@ export default function App() {
     return 'idle';
   }, [micListening, typing, speakingNow, bargeInActive, backend, status]);
 
-  const send = async (rawText) => {
-    const text = rawText.trim();
-    if (!text || busyRef.current) return;
+  const send = async (rawText, file) => {
+    const text = (rawText || '').trim();
+    if ((!text && !file) || busyRef.current) return;
+
+    // Attached file: content goes into the message sent to Priya (and stays
+    // in history context), while the UI shows a chip + the user's own text.
+    const fileBlock = file
+      ? `[Attached file: ${file.name} (${file.size} bytes)]\n\`\`\`\n${file.content}\n\`\`\``
+      : '';
+    const fullContent = (fileBlock ? fileBlock + '\n\n' : '') + text;
+
+    // Dedup: block identical consecutive sends (double-taps, stale voice results).
+    const last = messages.length ? messages[messages.length - 1] : null;
+    if (last && last.role === 'user' && last.content === fullContent) {
+      toast('Same message already sent.');
+      return;
+    }
 
     busyRef.current = true;
     setTyping(true);
 
-    const lang = detectLang(text);
+    const lang = detectLang(text || fileBlock);
     lastLangRef.current = lang;
     pendingSearchRef.current =
       settings.webSearch &&
       /(latest|current|today|now|news|version|pricing|price|cost|supported|documentation|docs|error|bug|fix|update|download|install|how to|2024|2025|2026)/i.test(text);
-    const userMsg = { role: 'user', content: text, time: timeStr(), lang };
+    const userMsg = { role: 'user', content: fullContent, display: text, file: file ? file.name : null, time: timeStr(), lang };
     const newHistory = [...messages, userMsg];
     setMessages(newHistory);
 

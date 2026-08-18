@@ -8,6 +8,7 @@ const { callWithFallback, providerStatus } = require('./providers');
 const { webSearch, fetchPage } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
 const { calc } = require('./calc');
+const { replyToCsv } = require('./markdown-csv');
 const { synthesize, ttsStatus, SARVAM_VOICES } = require('./tts');
 
 const app = express();
@@ -76,6 +77,15 @@ function isPureMath(s) {
     /[+\-*/%^×÷]/.test(s) &&
     /^[\d\s.()+\-*/%^×÷]+$/.test(s)
   );
+}
+
+// Some reasoning models reply with a "tool-call stub" ("Let me research…")
+// instead of answering. Detect it so we can force a final direct answer.
+function isStub(text) {
+  const t = (text || '').trim();
+  if (t.length > 200) return false;
+  return /^(let me|i'?ll|i will|i can|ok(ay)?,?|sure,?|of course|i need to|just a moment|give me a moment)/i.test(t) &&
+    /(search|research|gather|look up|find out|start|check)/i.test(t);
 }
 
 app.post('/api/chat', async (req, res, next) => {
@@ -169,6 +179,7 @@ app.post('/api/chat', async (req, res, next) => {
 
     /* ---------- Optional downloadable report ---------- */
     const wantsDownload = !!toolResult || (!!openMatch ? false : DOWNLOAD_RE.test(cleanMessage));
+    const wantsCsv = !toolResult && !openMatch && /csv|spreadsheet|excel|\.csv|table banao|list banao|sari cheezein/i.test(cleanMessage);
 
     /* ---------- AI response with provider fallback ---------- */
     const system = buildSystemPrompt({ mode, lang, searchContext, searchStatus });
@@ -177,16 +188,85 @@ app.post('/api/chat', async (req, res, next) => {
     if (toolResult && toolResult.context) messages.push({ role: 'user', content: toolResult.context });
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 45000);
+    const timer = setTimeout(() => controller.abort(), 90000);
     try {
-      const { text, provider, model } = await callWithFallback({
+      let result = await callWithFallback({
         system,
         messages,
         temperature: 0.7,
         maxTokens: maxTokensFor(mode),
         signal: controller.signal
       });
+
+      // The model asked for a web search in its reply (Sarvam emits tool-call
+      // markup as text). Run the real search and retry once with results.
+      let retriedTool = false;
+      if (result.requestedTool && result.toolQuery && !searched && !retriedTool) {
+        retriedTool = true;
+        try {
+          const results = await webSearch(result.toolQuery, 4);
+          if (results.length > 0) {
+            sources = results;
+            searched = true;
+            searchStatus = 'ok';
+            searchContext = results
+              .map((s, i) => `[${i + 1}] ${s.title}\n    URL: ${s.url}\n    ${(s.snippet || '').slice(0, 160)}`)
+              .join('\n');
+            result = await callWithFallback({
+              system: buildSystemPrompt({ mode, lang, searchContext, searchStatus }),
+              messages,
+              temperature: 0.7,
+              maxTokens: maxTokensFor(mode),
+              signal: controller.signal
+            });
+          }
+        } catch (e) {
+          console.error('tool-search retry failed:', e.message);
+        }
+      }
+
+      // Force-answer round: if the model only produced a stub ("Let me
+      // research…") or kept asking for tools, append an explicit instruction
+      // and ask once more so the user actually gets an answer.
+      let forcedAnswer = false;
+      if ((isStub(result.text) || result.requestedTool) && !forcedAnswer) {
+        forcedAnswer = true;
+        try {
+          const pushMsg =
+            'IMPORTANT: Do NOT call or mention any tool and do NOT say you will search/research first. The web search has already been completed (results are in your context if relevant). Answer the user\'s original request DIRECTLY now, in full, without any introduction stub.';
+          result = await callWithFallback({
+            system: buildSystemPrompt({ mode, lang, searchContext, searchStatus }),
+            messages: [...messages, { role: 'user', content: pushMsg }],
+            temperature: 0.7,
+            maxTokens: maxTokensFor(mode),
+            signal: controller.signal
+          });
+        } catch (e) {
+          console.error('force-answer retry failed:', e.message);
+        }
+      }
+      const { text, provider, model } = result;
       clearTimeout(timer);
+
+      // Never deliver a tool-call stub as an answer, and never attach it as a
+      // download: if the model still did not answer, say so honestly.
+      if (!text || !text.trim() || isStub(text)) {
+        return res.json({
+          reply:
+            'Priya ko aapka jawab banate waqt AI service se incomplete response mila — please ek baar phir se poochiye, ya thoda alag tareeke se likhiye. (Priya got an incomplete response from the AI service — please ask again.)',
+          sources,
+          searched,
+          tool: false,
+          provider,
+          model,
+          searchStatus,
+          download: null,
+          incomplete: true
+        });
+      }
+
+      // CSV / spreadsheet requests: turn any markdown tables in the reply into a .csv download.
+      const csv = wantsCsv ? replyToCsv(text) : null;
       return res.json({
         reply: text,
         sources,
@@ -198,9 +278,16 @@ app.post('/api/chat', async (req, res, next) => {
         download: wantsDownload
           ? {
               filename: `priya-${new Date().toISOString().slice(0, 10)}.md`,
-              content: text
+              content: text,
+              kind: 'md'
             }
-          : null
+          : csv
+            ? {
+                filename: `priya-${new Date().toISOString().slice(0, 10)}.csv`,
+                content: csv,
+                kind: 'csv'
+              }
+            : null
       });
     } catch (e) {
       clearTimeout(timer);

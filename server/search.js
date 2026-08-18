@@ -74,18 +74,175 @@ async function duckDuckGoSearch(q, limit) {
   return results;
 }
 
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'what', 'which', 'when', 'where', 'how', 'why',
+  'are', 'was', 'were', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'does', 'do',
+  'of', 'to', 'in', 'is', 'it', 'on', 'at', 'by', 'as', 'an', 'or', 'be', 'if', 'me', 'my', 'we', 'us',
+  'up', 'down', 'out', 'off', 'into', 'about', 'over', 'under', 'also', 'very', 'just', 'now', 'one',
+  'two', 'get', 'help', 'need', 'want', 'please', 'tell', 'show', 'explain', 'your', 'you', 'their',
+  'them', 'its', 'our', 'list', 'info', 'information', 'use', 'using', 'make', 'like', 'want', 'some',
+  'more', 'than', 'then', 'not', 'but', 'been', 'being', 'had', 'any', 'all', 'each', 'few', 'most',
+  'other', 'some', 'such', 'those', 'there', 'here'
+]);
+
+// Domains that are almost never the answer to a tech question.
+const JUNK_RE =
+  /(poki\.com|crazygames|freegames|garena|kizi\.com|friv|agame|games\.io|(?:play|apps)\.google\.com\/store|quora\.com|pinterest|facebook\.com|instagram\.com|tiktok\.com|amazon\.|aliexpress|temu\.com|walmart\.com|ebay\.com|booking\.com|tripadvisor|skyscanner|expedia|healthline\.com|webmd\.com|wiki\.how|answers\.com|slideshare|scribd|researchgate\.net|britannica|buzzfeed|forbes\.com|msn\.com|newsbreak|dailymail|ndtv\.com|lokmat\.com|livemint\.com|hindustantimes\.com|plex\.tv|tubitv\.com|y8\.com|merriam-webster\.com|dictionary\.cambridge\.org|thefreedictionary\.com|dictionary\.com|wordreference\.com|collinsdictionary\.com|vocabulary\.com|thesaurus\.com|bestbuy\.com|target\.com|flipkart\.com|zillow\.com|indeed\.com|monster\.com|yahoo\.com|aol\.com|x\.com\/|twitter\.com\/|youtube\.com|ifixit\.com|fixderma|ideascale\.com|researchmethod\.net|en\.m\.wikipedia\.org\/wiki\/Research)/i;
+
+// Known official documentation hosts per product — when the user asks about
+// one of these, we also search the official docs directly.
+const OFFICIAL_DOMAINS = [
+  { terms: ['render'], host: 'render.com' },
+  { terms: ['netlify'], host: 'docs.netlify.com' },
+  { terms: ['vercel'], host: 'vercel.com' },
+  { terms: ['gemini', 'aistudio'], host: 'ai.google.dev' },
+  { terms: ['openai', 'chatgpt'], host: 'platform.openai.com' },
+  { terms: ['anthropic', 'claude'], host: 'docs.anthropic.com' },
+  { terms: ['groq'], host: 'console.groq.com' },
+  { terms: ['sarvam'], host: 'docs.sarvam.ai' },
+  { terms: ['mistral', 'le chat'], host: 'docs.mistral.ai' },
+  { terms: ['supabase'], host: 'supabase.com' },
+  { terms: ['firebase'], host: 'firebase.google.com' },
+  { terms: ['cloudflare'], host: 'developers.cloudflare.com' },
+  { terms: ['github'], host: 'docs.github.com' },
+  { terms: ['netlify'], host: 'docs.netlify.com' },
+  { terms: ['react'], host: 'react.dev' },
+  { terms: ['nextjs', 'next.js'], host: 'nextjs.org' },
+  { terms: ['node'], host: 'nodejs.org' },
+  { terms: ['npm'], host: 'docs.npmjs.com' },
+  { terms: ['docker'], host: 'docs.docker.com' },
+  { terms: ['typescript'], host: 'www.typescriptlang.org' },
+  { terms: ['python'], host: 'docs.python.org' }
+];
+
+function officialHostFor(q) {
+  const lq = q.toLowerCase();
+  for (const d of OFFICIAL_DOMAINS) {
+    if (d.terms.some((t) => lq.includes(t))) return d.host;
+  }
+  return null;
+}
+
+// Keyless search engines sometimes return SEO junk. Keep only results that
+// actually relate to the query: weighted term hits (title counts most), a
+// junk-domain blocklist, and an optional official-docs search pass.
+function relevantTerms(q) {
+  const terms = new Set();
+  for (const raw of q.toLowerCase().match(/[a-z0-9]{2,30}/g) || []) {
+    if (!STOPWORDS.has(raw)) terms.add(raw);
+  }
+  return [...terms];
+}
+
+function scoreResult(terms, r) {
+  if (JUNK_RE.test(r.url)) return -1;
+  const title = r.title.toLowerCase();
+  const url = r.url.toLowerCase();
+  const snip = (r.snippet || '').toLowerCase();
+  let score = 0;
+  const hit = new Set();
+  for (const t of terms) {
+    const inT = title.includes(t);
+    const inU = url.includes(t);
+    const inS = snip.includes(t);
+    if (inT) { score += 3; hit.add(t); }
+    if (inU) { score += 2; hit.add(t); }
+    if (inS) { score += 1; hit.add(t); }
+  }
+  // Pass only when the result genuinely relates: at least one query term in
+  // the title/URL AND two distinct term hits, or a very high score.
+  const titleOrUrl = terms.some((t) => title.includes(t) || url.includes(t));
+  if ((hit.size >= 2 && titleOrUrl) || score >= 6) return score;
+  return 0;
+}
+
+function filterRelevant(results, q) {
+  const terms = relevantTerms(q);
+  if (terms.length === 0) return results.filter((r) => !JUNK_RE.test(r.url));
+  const scored = results
+    .map((r) => ({ r, score: scoreResult(terms, r) }))
+    .filter((s) => s.score >= 3)
+    .sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.r);
+}
+
 /**
- * Live web search. Tries Bing first, falls back to DuckDuckGo.
+ * Tavily Search API (legit free tier: 1,000 searches/month, no credit card,
+ * https://app.tavily.com). Used when TAVILY_API_KEY is configured.
+ * @param {string} q
+ * @param {number} limit
+ */
+async function tavilySearch(q, limit) {
+  const key = process.env.TAVILY_API_KEY;
+  if (!key) return null;
+  const res = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: key, query: q, search_depth: 'basic', max_results: limit })
+  });
+  if (!res.ok) {
+    const err = new Error(`Tavily search failed (${res.status}).`);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  return (data.results || [])
+    .filter((x) => x.title && x.url)
+    .map((x) => ({ title: x.title, url: x.url, snippet: x.content || '' }));
+}
+
+/**
+ * Live web search. Preference order:
+ *   1. Tavily (when TAVILY_API_KEY is configured — reliable, official results)
+ *   2. Official documentation host for known products (keyless)
+ *   3. Bing -> DuckDuckGo keyless chain (SEO junk filtered out)
  * @param {string} q
  * @param {number} [limit]
  */
 async function webSearch(q, limit = 5) {
   const l = Math.max(1, Math.min(8, limit));
-  try {
-    const r = await bingSearch(q, l);
-    if (r.length) return r;
-  } catch (e) { /* fall through */ }
-  return duckDuckGoSearch(q, l);
+  const seen = new Set();
+  const merged = [];
+
+  const add = (r) => {
+    if (!r || !r.url || seen.has(r.url)) return;
+    seen.add(r.url);
+    merged.push(r);
+  };
+
+  if (process.env.TAVILY_API_KEY) {
+    try {
+      for (const r of filterRelevant(await tavilySearch(q, l * 2), q)) add(r);
+    } catch (e) {
+      console.error('tavily search failed, using keyless fallback:', e.message);
+    }
+  }
+
+  // Official-docs pass: when the query mentions a known product, official
+  // documentation is almost always the best answer.
+  const host = officialHostFor(q);
+  if (merged.length < l && host) {
+    try {
+      for (const r of filterRelevant(await bingSearch(`site:${host} ${q}`, l * 3), q)) add(r);
+    } catch (e) { /* fall through */ }
+    try {
+      for (const r of filterRelevant(await duckDuckGoSearch(`site:${host} ${q}`, l * 3), q)) add(r);
+    } catch (e) { /* fall through */ }
+  }
+
+  if (merged.length < l) {
+    try {
+      for (const r of filterRelevant(await bingSearch(q, l * 3), q)) add(r);
+    } catch (e) { /* fall through */ }
+  }
+
+  if (merged.length < l) {
+    try {
+      for (const r of filterRelevant(await duckDuckGoSearch(q, l * 3), q)) add(r);
+    } catch (e) { /* fall through */ }
+  }
+
+  return merged.slice(0, l);
 }
 
 /**

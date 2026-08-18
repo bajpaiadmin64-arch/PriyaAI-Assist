@@ -23,7 +23,7 @@ The **API key lives only on the server** (environment variable). It is never sen
 | Frontend | React 19 + Vite 8 (`client/`) |
 | Backend | Node.js + Express (`server/`) — no frameworks beyond Express |
 | AI model | Sarvam `sarvam-105b` (Indian-first, native Hindi) or Gemini `gemini-3.5-flash` when its key is set |
-| Live web search | Server-side (Bing → DuckDuckGo fallback) |
+| Live web search | Server-side (Tavily when key set → Bing → DuckDuckGo) |
 
 ## Features
 
@@ -36,6 +36,9 @@ The **API key lives only on the server** (environment variable). It is never sen
 - 🌐 **Page reader tool** (`!open https://…` to read a public page's current content)
 - 📄 **Report download** — ask Priya to "create a report" and she saves it as a file
 - ⚡ **AI limits & fallback system** — up to 5 providers (Gemini → Sarvam → Groq → OpenRouter → OpenAI, configurable via `CHAT_PROVIDERS`). Rate-limited/failing providers are cooled down for 90s and Priya switches automatically; every call retries once with backoff. Token diet (bounded history, mode-based output caps, small search context) keeps free-tier usage low. Live provider status + free-key instructions inside Settings → AI providers.
+- 📎 **File attachment** — attach `.txt/.md/.csv/.json/.log/.js/.jsx/.ts/.tsx/.html/.css/.py/.sh/.yml/.yaml` (up to 50 KB) and ask Priya to summarize, fix, or convert it
+- 📊 **CSV / spreadsheet downloads** — ask for a table/CSV/spreadsheet and the reply downloads as a `.csv` file
+- 🔎 **Reliable research** — add the free Tavily key (`TAVILY_API_KEY`, 1,000 searches/mo, no credit card) and search results come from a proper search API with SEO junk filtered; without a key, keyless engines (Bing/DuckDuckGo) still work but many public engines now block keyless scraping, so research answers may be limited — Priya says so honestly instead of inventing facts.
 - 🪪 **Core identity** — owner/developer is Utkarsh Bajpai; "I was designed and developed by Utkarsh Bajpai."
 - 📋 Copy / code-copy buttons, markdown rendering, multi-turn context
 - 🧹 New conversation, clear, export chat (.md)
@@ -106,6 +109,7 @@ npm start         # serves API + built frontend on PORT (default 3000)
 | `GROQ_MODEL` | ❌ | Override Groq model (default `llama-3.3-70b-versatile`) |
 | `SARVAM_LLM_MODEL` | ❌ | Override Sarvam model (default `sarvam-105b`) |
 | `CHAT_PROVIDERS` | ❌ | Fallback order (default `gemini,sarvam,groq,openrouter,openai`) |
+| `TAVILY_API_KEY` | ⚪ | Free web-search key (1,000 searches/mo, no card) — https://app.tavily.com. Without it Priya uses keyless engines. |
 | `PORT` | ❌ | Backend port (Render sets it automatically) |
 
 Priya only uses providers whose key is set, and never leaks keys. Free tiers are metered: on a rate limit Priya cools that provider down and switches automatically, so a single provider being exhausted never blocks the chat.

@@ -93,6 +93,7 @@ export default function SettingsModal({ open, settings, onChange, onClose }) {
                   <li><strong>Groq</strong> — free, no card · <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a>. Env: <code>GROQ_API_KEY</code></li>
                   <li><strong>Sarvam AI</strong> — Indian languages · <a href="https://dashboard.sarvam.ai" target="_blank" rel="noreferrer">dashboard.sarvam.ai</a>. Env: <code>SARVAM_API_KEY</code></li>
                   <li><strong>OpenRouter</strong> — free models · <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">openrouter.ai/keys</a>. Env: <code>OPENROUTER_API_KEY</code></li>
+                  <li><strong>Tavily (web search)</strong> — free 1,000 searches/mo, no card · <a href="https://app.tavily.com" target="_blank" rel="noreferrer">app.tavily.com</a>. Env: <code>TAVILY_API_KEY</code> (without it, keyless search works but is less reliable)</li>
                 </ul>
               </>
             ) : (

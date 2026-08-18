@@ -52,7 +52,14 @@ export default function Message({ msg, speed = 'normal', voice = 'priya' }) {
       {!isUser && <PriyaOrb size="sm" state="idle" />}
       <div className="msg-main">
         <div className={`msg-bubble ${isUser ? '' : 'priya-bubble'}`}>
-          {isUser ? msg.content : <Markdown text={msg.content} />}
+          {isUser ? (
+            <>
+              {msg.file && <div className="file-chip">📎 {msg.file}</div>}
+              {msg.display != null ? msg.display : msg.content}
+            </>
+          ) : (
+            <Markdown text={msg.content} />
+          )}
           {msg.error && <div className="msg-error">{msg.error}</div>}
         </div>
 
