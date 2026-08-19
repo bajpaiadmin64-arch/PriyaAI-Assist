@@ -7,6 +7,7 @@ const express = require('express');
 const { callWithFallback, providerStatus } = require('./providers');
 const store = require('./provider-store');
 const providerSystem = require('./provider-system');
+const health = require('./provider-health');
 const { CATALOG, CUSTOM_ID, findProvider, defaultOrder } = require('./model-catalog');
 const { webSearch, fetchPage } = require('./search');
 const { buildSystemPrompt } = require('./prompt');
@@ -41,7 +42,9 @@ app.get('/api/health', (_req, res) => {
     configured: !!configured,
     provider: configured ? configured.name : 'none',
     providers,
-    selected: selInfo ? { provider: selected, label: selInfo.name, model: selInfo.model } : null
+    selected: selInfo ? { provider: selected, label: selInfo.name, model: selInfo.model } : null,
+    local: health.localStatus(),
+    lastWorking: health.lastWorking()
   });
 });
 
@@ -63,10 +66,14 @@ function providerListView() {
       notes: entry.notes,
       keyEnv: entry.keyEnv,
       models: entry.models,
+      tier: entry.tier,
+      freeLabel: entry.freeLabel || null,
+      keyRequired: entry.keyRequired !== false,
+      local: !!entry.local,
       source: row ? row.source : null,
       maskedKey: row ? row.maskedKey : null,
-      model: row ? row.model : null,
-      configured: !!store.getKey(entry.id),
+      model: (row && row.model) || (entry.models && entry.models[0] && entry.models[0].id) || null,
+      configured: !!store.getKey(entry.id) || entry.keyRequired === false,
       selected: selected === entry.id
     });
   }
@@ -92,10 +99,19 @@ app.get('/api/providers', (_req, res) => {
   const cooldowns = providerStatus();
   const providers = providerListView().map((p) => {
     const cd = cooldowns.find((c) => c.name === p.id);
-    return { ...p, cooldownSec: cd ? cd.cooldownSec : 0 };
+    return {
+      ...p,
+      state: cd ? cd.state : 'ok',
+      errorCode: cd ? cd.errorCode : null,
+      reason: cd ? cd.reason : null,
+      cooldownSec: cd ? cd.cooldownSec : 0,
+      failures: cd ? cd.failures : 0,
+      lastSuccess: cd ? cd.lastSuccess : null,
+      remaining: cd ? cd.remaining : null
+    };
   });
   const selected = store.getSelected();
-  res.json({ providers, selected, order: store.getOrder(), defaultOrder: defaultOrder() });
+  res.json({ providers, selected, order: store.getOrder(), defaultOrder: defaultOrder(), local: health.localStatus(), lastWorking: health.lastWorking() });
 });
 
 app.post('/api/providers/test', async (req, res, next) => {
@@ -129,6 +145,8 @@ app.put('/api/providers/keys', async (req, res, next) => {
       return res.status(400).json({ error: `Unknown provider: ${id}` });
     }
     const masked = store.set(id, { apiKey, model, baseUrl, name });
+    // A fresh key deserves a fresh slate — drop cooldowns/blocks instantly.
+    health.keyUpdated(id);
     res.json({ ok: true, maskedKey: masked, configured: true });
   } catch (e) {
     next(e);
@@ -138,6 +156,7 @@ app.put('/api/providers/keys', async (req, res, next) => {
 app.delete('/api/providers/keys/:providerId', (req, res) => {
   const id = (req.params.providerId || '').trim();
   store.remove(id);
+  health.keyUpdated(id);
   res.json({ ok: true });
 });
 
@@ -146,7 +165,7 @@ app.post('/api/providers/select', (req, res) => {
   if (!id) return res.status(400).json({ error: 'providerId is required.' });
   const ok = store.setSelected(id);
   if (!ok) {
-    return res.status(400).json({ error: 'That provider has no API key configured yet — add one first.' });
+    return res.status(400).json({ error: 'That provider is not usable yet — add its API key first (or start Ollama / LM Studio for local providers).' });
   }
   const cfg = providerSystem.credsFor(id);
   res.json({ ok: true, selected: id, provider: id, model: cfg.model, label: findProvider(id) ? findProvider(id).name : 'Custom' });
@@ -338,6 +357,7 @@ async function streamAnswer(res, ctx, providerId) {
       send({ type: 'delta', text: delta });
     }
     clearTimeout(timer);
+    health.recordSuccess(selected);
     if (!text.trim() || isStub(text)) {
       send({ type: 'error', message: 'Priya got an incomplete response from the AI service — please try again.' });
       res.end();
@@ -357,6 +377,33 @@ async function streamAnswer(res, ctx, providerId) {
     return true;
   } catch (e) {
     clearTimeout(timer);
+    health.recordFailure(selected, { code: providerSystem.classify(e.status, e.code, e.message), status: e.status, message: e.message });
+    if (!text) {
+      // Nothing was streamed yet — continue the conversation on the next
+      // available provider automatically (free-first chain).
+      try {
+        const fb = await callWithFallback({
+          system: ctx.system,
+          messages: ctx.messages,
+          temperature: 0.7,
+          maxTokens: maxTokensFor(ctx.mode),
+          providerId
+        });
+        const send2 = (obj) => { try { res.write(`data: ${JSON.stringify(obj)}\n\n`); } catch (err) { /* client gone */ } };
+        send2({
+          type: 'done',
+          reply: fb.text,
+          provider: fb.provider,
+          model: fb.model,
+          sources: ctx.sources,
+          searched: ctx.searched,
+          searchStatus: ctx.searchStatus,
+          download: buildDownload(fb.text, ctx.wantsDownload, ctx.wantsCsv)
+        });
+        res.end();
+        return true;
+      } catch (err2) { /* fall through to the error event below */ }
+    }
     const msg = (e && e.status >= 400 && e.status < 600) ? e.message : 'Priya hit a temporary issue — please try again.';
     try { res.write(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`); res.end(); } catch (err) { /* ignore */ }
     return true;
@@ -572,6 +619,11 @@ app.use((err, _req, res, _next) => {
       error: 'No AI provider is configured on the server. Add an API key in Settings → AI Models & API, or set GEMINI_API_KEY / SARVAM_API_KEY / GROQ_API_KEY in the server .env file and restart.'
     });
   }
+  if (err.status === 503 && err.code === 'ALL_UNAVAILABLE') {
+    return res.status(503).json({
+      error: 'All currently configured AI providers are unavailable. Please add another API key or try again later.'
+    });
+  }
   const status = typeof err.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
   res.status(status).json({
     error: err.message || 'Priya is temporarily unable to connect to the AI service. Please try again.'
@@ -581,6 +633,15 @@ app.use((err, _req, res, _next) => {
 app.listen(PORT, () => {
   console.log(`Priya AI backend running on http://localhost:${PORT}`);
   for (const p of providerStatus()) {
-    console.log(`  ${p.name.padEnd(11)} configured=${p.configured} model=${p.model || '-'}`);
+    console.log(`  ${p.name.padEnd(11)} tier=${(p.tier || '?').padEnd(5)} configured=${p.configured} model=${p.model || '-'}`);
   }
+  // Local AI detection (Ollama / LM Studio) — refreshed periodically so the
+  // no-key tier lights up as soon as a local server starts.
+  const refreshLocal = async () => {
+    try {
+      health.setLocalStatus(await providerSystem.detectLocal());
+    } catch (e) { /* probe is best-effort */ }
+  };
+  refreshLocal();
+  setInterval(refreshLocal, 15000);
 });

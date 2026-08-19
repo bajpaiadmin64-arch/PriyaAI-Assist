@@ -67,16 +67,26 @@ function credsFor(providerId) {
     (stored && stored.baseUrl) ||
     (entry && entry.baseUrl) ||
     null;
-  return { providerId, apiKey, model, baseUrl, apiFormat: entry ? entry.apiFormat : 'openai', name: entry ? entry.name : providerId };
+  const keyRequired = entry ? entry.keyRequired !== false : true;
+  return {
+    providerId,
+    apiKey,
+    model,
+    baseUrl,
+    apiFormat: entry ? entry.apiFormat : 'openai',
+    name: entry ? entry.name : providerId,
+    keyRequired,
+    tier: entry ? entry.tier : 'custom'
+  };
 }
 
-/** List of providers with a usable key, in fallback order (selected first). */
+/** List of usable providers in fallback order (selected first). */
 function configuredProviders() {
   const order = store.getOrder();
   const out = [];
   for (const id of order) {
     const c = credsFor(id);
-    if (c.apiKey) out.push(c);
+    if (c.apiKey || !c.keyRequired) out.push(c);
   }
   // Custom providers stored by the user come last (they are user-specific).
   for (const row of store.list()) {
@@ -102,6 +112,52 @@ function chatOpenAI(cfg, opts) {
     },
     opts
   );
+}
+
+/**
+ * Pollinations.ai — public free endpoint, OpenAI-shaped body, no auth.
+ * Anonymous tier is ~1 req/15s, so this is the LAST resort provider.
+ * Endpoint: POST https://text.pollinations.ai/openai
+ */
+function chatPollinations(cfg, { system, messages, temperature, maxTokens, signal }) {
+  const url = `${(cfg.baseUrl || 'https://text.pollinations.ai').replace(/\/+$/, '')}/openai`;
+  const body = {
+    model: cfg.model || 'openai',
+    messages: [
+      { role: 'system', content: system },
+      ...messages.map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }))
+    ],
+    temperature: typeof temperature === 'number' ? temperature : 0.7,
+    max_tokens: maxTokens || 2048
+  };
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal
+  })
+    .then(async (res) => {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error(friendlyProviderError(cfg.name || 'Pollinations', res.status, data));
+        err.status = res.status;
+        throw err;
+      }
+      const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+      if (!text || !text.trim()) {
+        const err = new Error('Priya could not generate a response. Please rephrase your message.');
+        err.status = 200;
+        throw err;
+      }
+      return { text: text.trim(), model: cfg.model || 'openai' };
+    })
+    .catch((e) => {
+      if (e && e.status) throw e;
+      const err = new Error('Priya is temporarily unable to connect to the AI service (network issue). Please try again.');
+      err.status = 502;
+      err.code = 'NETWORK';
+      throw err;
+    });
 }
 
 function chatAnthropic(cfg, { system, messages, temperature, maxTokens, signal }) {
@@ -158,7 +214,7 @@ function friendlyProviderError(label, status, data) {
 /** Unified chat call for a configured provider. */
 async function chatWith(providerId, opts) {
   const cfg = credsFor(providerId);
-  if (!cfg.apiKey) {
+  if (!cfg.apiKey && cfg.keyRequired !== false) {
     const err = new Error(`${cfg.name || providerId} is not configured (no API key).`);
     err.status = 503;
     err.code = 'MISSING_KEY';
@@ -168,6 +224,7 @@ async function chatWith(providerId, opts) {
     case 'gemini': return chatGemini(opts, { apiKey: cfg.apiKey, model: cfg.model, baseUrl: cfg.baseUrl });
     case 'anthropic': return chatAnthropic(cfg, opts);
     case 'sarvam': return chatSarvam(opts, { apiKey: cfg.apiKey, model: cfg.model, baseUrl: cfg.baseUrl });
+    case 'pollinations': return chatPollinations(cfg, opts);
     default: return chatOpenAI(cfg, opts);
   }
 }
@@ -190,7 +247,7 @@ async function* streamOpenAI(cfg, { system, messages, temperature, maxTokens, si
   };
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    headers: cfg.apiKey ? { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` } : { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal
   });
@@ -310,11 +367,12 @@ async function* streamAnthropic(cfg, { system, messages, temperature, maxTokens,
 /** Streaming generator for a provider, or null when it cannot stream. */
 function streamChatWith(providerId, opts) {
   const cfg = credsFor(providerId);
-  if (!cfg.apiKey) return null;
+  if (!cfg.apiKey && cfg.keyRequired !== false) return null;
   switch (cfg.apiFormat) {
     case 'gemini': return streamGemini(cfg, opts);
     case 'anthropic': return streamAnthropic(cfg, opts);
     case 'sarvam': return null;
+    case 'pollinations': return null;
     default: return streamOpenAI(cfg, opts);
   }
 }
@@ -322,9 +380,9 @@ function streamChatWith(providerId, opts) {
 function supportsStreaming(providerId) {
   const cfg = credsFor(providerId);
   const entry = findProvider(providerId);
-  if (cfg.apiFormat === 'sarvam') return false;
+  if (cfg.apiFormat === 'sarvam' || cfg.apiFormat === 'pollinations') return false;
   const modelEntry = entry && entry.models.find((m) => m.id === cfg.model);
-  return modelEntry ? !!modelEntry.streaming : cfg.apiFormat !== 'sarvam';
+  return modelEntry ? !!modelEntry.streaming : cfg.apiFormat !== 'sarvam' && cfg.apiFormat !== 'pollinations';
 }
 
 /* ------------------------------------------------------------------ */
@@ -339,10 +397,11 @@ async function testConnection(providerId, creds = {}) {
   const baseUrl = creds.baseUrl || (stored && stored.baseUrl) || (entry && entry.baseUrl) || '';
   const apiFormat = entry ? entry.apiFormat : 'openai';
   const label = creds.name || (entry ? entry.name : providerId);
+  const keyRequired = entry ? entry.keyRequired !== false : true;
 
-  if (!apiKey) return { ok: false, message: 'No API key provided.', code: 'AUTH', latencyMs: 0 };
+  if (!apiKey && keyRequired) return { ok: false, message: 'No API key provided.', code: 'AUTH', latencyMs: 0 };
   if (!model) return { ok: false, message: 'No model selected.', code: 'MODEL', latencyMs: 0 };
-  if (apiFormat !== 'gemini' && apiFormat !== 'anthropic' && apiFormat !== 'sarvam' && !baseUrl) {
+  if (apiFormat !== 'gemini' && apiFormat !== 'anthropic' && apiFormat !== 'sarvam' && apiFormat !== 'pollinations' && !baseUrl) {
     return { ok: false, message: 'No Base URL configured.', code: 'ENDPOINT', latencyMs: 0 };
   }
 
@@ -365,11 +424,17 @@ async function testConnection(providerId, creds = {}) {
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model, max_tokens: 8, messages: [{ role: 'user', content: 'Reply with exactly: OK' }] })
       });
+    } else if (apiFormat === 'pollinations') {
+      res = await fetch(`${(baseUrl || 'https://text.pollinations.ai').replace(/\/+$/, '')}/openai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with exactly: OK' }], max_tokens: 8 })
+      });
     } else {
       // openai / sarvam (both OpenAI-shaped bodies; Sarvam adds its own headers)
       const headers = { 'Content-Type': 'application/json' };
       if (apiFormat === 'sarvam') headers['api-subscription-key'] = apiKey;
-      else headers.Authorization = `Bearer ${apiKey}`;
+      else if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
       const body = { model, messages: [{ role: 'user', content: 'Reply with exactly: OK' }] };
       const path = apiFormat === 'sarvam' ? '/v1/chat/completions' : '/chat/completions';
       res = await fetch(`${baseUrl.replace(/\/+$/, '')}${path}`, {
@@ -412,10 +477,64 @@ async function getModels(providerId, apiKey) {
       }
     } catch (e) { /* fall back to catalog */ }
   }
+  if (providerId === 'ollama' || providerId === 'lmstudio') {
+    try {
+      const base = (entry && entry.baseUrl) || '';
+      const res = await fetch(`${base}/models`, { signal: AbortSignal.timeout(1500) });
+      if (res.ok) {
+        const data = await res.json();
+        const models = (data.data || []).map((m) => ({ id: m.id, name: m.id }));
+        if (models.length) return models;
+      }
+    } catch (e) { /* fall back to catalog */ }
+  }
+  if (providerId === 'pollinations') {
+    try {
+      const res = await fetch('https://text.pollinations.ai/models', { signal: AbortSignal.timeout(4000) });
+      if (res.ok) {
+        const data = await res.json();
+        const models = (Array.isArray(data) ? data : []).map((m) => ({ id: m.name || m, name: m.name || m }));
+        if (models.length) return models;
+      }
+    } catch (e) { /* fall back to catalog */ }
+  }
   return catalogModels;
+}
+
+/* ------------------------------------------------------------------ */
+/* Local AI detection (Ollama / LM Studio)                             */
+/* ------------------------------------------------------------------ */
+
+let localCache = { status: null, at: 0 };
+const LOCAL_TTL_MS = 10000;
+
+/**
+ * Probe local OpenAI-compatible servers. Results are cached 10s so the chat
+ * path never adds latency; index.js refreshes periodically too.
+ * @returns {Promise<{ollama:boolean, lmstudio:boolean}>}
+ */
+async function detectLocal() {
+  const now = Date.now();
+  if (localCache.status && now - localCache.at < LOCAL_TTL_MS) return localCache.status;
+  const status = { ollama: false, lmstudio: false };
+  await Promise.all([
+    fetch('http://127.0.0.1:11434/v1/models', { signal: AbortSignal.timeout(1500) })
+      .then((res) => { if (res.ok) status.ollama = true; })
+      .catch(() => {}),
+    fetch('http://127.0.0.1:1234/v1/models', { signal: AbortSignal.timeout(1500) })
+      .then((res) => { if (res.ok) status.lmstudio = true; })
+      .catch(() => {})
+  ]);
+  localCache = { status, at: Date.now() };
+  return status;
+}
+
+function localStatusCached() {
+  return localCache.status || null;
 }
 
 module.exports = {
   credsFor, configuredProviders, chatWith, streamChatWith, supportsStreaming,
-  testConnection, getModels, classify, CODE_MESSAGES
+  testConnection, getModels, classify, CODE_MESSAGES,
+  detectLocal, localStatusCached
 };

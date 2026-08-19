@@ -166,6 +166,28 @@ export default function SettingsModal({ open, settings, onChange, onClose, onPro
 
   const editingProvider = editing ? providers.find((p) => p.id === editing.id) : null;
 
+  // ---- Provider dashboard helpers ----
+  const local = (providersData && providersData.local) || { ollama: false, lmstudio: false };
+  const localOn = !!local.ollama || !!local.lmstudio;
+  const localNames = [local.ollama && 'Ollama', local.lmstudio && 'LM Studio'].filter(Boolean).join(' + ');
+  const TIER_LABEL = { free: 'FREE', nokey: 'NO-KEY', paid: 'PAID' };
+
+  function rowStateText(p) {
+    if (p.local && !local[p.id]) return 'local server not detected';
+    if (!p.configured) return p.keyRequired ? 'add key' : 'ready';
+    if (p.state === 'blocked') return `blocked (${p.reason || p.errorCode || 'hard error'}) — ${p.cooldownSec}s`;
+    if (p.state === 'cooldown') return `rate limited — retry in ${p.cooldownSec}s`;
+    if (p.selected) return 'active';
+    return 'ready';
+  }
+  function rowStateClass(p) {
+    if (p.local && !local[p.id]) return 'warn';
+    if (!p.configured) return 'off';
+    if (p.state === 'blocked') return 'fail';
+    if (p.state === 'cooldown') return 'warn';
+    return 'ok';
+  }
+
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal">
@@ -188,22 +210,28 @@ export default function SettingsModal({ open, settings, onChange, onClose, onPro
                   <div key={p.id} className={`provider-row ${p.selected ? 'selected' : ''}`}>
                     <span className={`vs-dot ${p.selected ? 'on' : p.configured ? 'on-dim' : ''}`} />
                     <div className="provider-info">
-                      <strong>{p.name} {p.selected ? <span className="badge">active</span> : null}</strong>
+                      <strong>
+                        {p.name}{' '}
+                        {p.selected ? <span className="badge">active</span> : null}{' '}
+                        <span className={`tier-chip tier-${p.tier || 'paid'}`}>{TIER_LABEL[p.tier] || 'CUSTOM'}</span>
+                      </strong>
                       <span className="provider-meta">
                         {p.configured
                           ? `${maskHint(p)}${p.model ? ' · ' + p.model : ''}`
-                          : '🔒 API key required'}
-                        {p.cooldownSec > 0 ? <span className="rate-warn"> ⚠ rate limited ({p.cooldownSec}s)</span> : ''}
+                          : p.keyRequired ? '🔒 API key required' : 'no key needed'}
+                        {p.freeLabel && p.tier !== 'paid' ? <span className="free-label"> · {p.freeLabel}</span> : ''}
+                        {' · '}
+                        <span className={`state-chip state-${rowStateClass(p)}`}>{rowStateText(p)}</span>
                       </span>
                     </div>
                     <div className="provider-actions">
-                      {p.configured && (
-                        <button type="button" className="mini-btn" disabled={p.selected} onClick={() => useModel(p)}>
-                          {p.selected ? 'Active' : 'Use Model'}
+                      {p.configured && !p.selected && (
+                        <button type="button" className="mini-btn" onClick={() => useModel(p)}>
+                          Use Model
                         </button>
                       )}
                       <button type="button" className="mini-btn" onClick={() => startEdit(p)}>
-                        {p.configured ? 'Edit Key' : 'Add API Key'}
+                        {p.configured ? 'Edit Key' : p.keyRequired ? 'Add API Key' : 'Configure'}
                       </button>
                       {p.configured && p.source === 'user' && (
                         <button type="button" className="mini-btn danger" onClick={() => removeKey(p)} title="Delete API key">🗑</button>
@@ -328,8 +356,11 @@ export default function SettingsModal({ open, settings, onChange, onClose, onPro
                 )}
 
                 <p className="field-hint">
-                  <strong>Fallback order:</strong> the active model is tried first; if it hits a rate limit, timeout or outage,
-                  Priya automatically switches to the next configured provider. Invalid API keys are reported — they are never retried in a loop.
+                  <strong>Free-first fallback:</strong> the active model is tried first, then free-tier providers
+                  (Gemini, Groq, OpenRouter, Mistral), then no-key sources (Pollinations, local Ollama / LM Studio),
+                  and finally any paid provider you configured. On a rate limit / outage Priya cools that provider
+                  down (60s → 2h for repeats) and automatically switches to the next one. Invalid keys and exhausted
+                  quotas are blocked for 12h — saving a key resets this instantly.
                 </p>
                 <p className="field-hint">
                   Keys you add here are stored on the server (never committed to GitHub, never shown in full).
@@ -337,6 +368,43 @@ export default function SettingsModal({ open, settings, onChange, onClose, onPro
                 </p>
               </>
             )}
+
+            {/* ------- Provider Dashboard ------- */}
+            <div className="field dashboard-field">
+              <label>Provider Dashboard</label>
+              <div className={`local-card ${localOn ? 'on' : ''}`}>
+                <span className={`vs-dot ${localOn ? 'on' : ''}`} />
+                {localOn ? `● Local AI — Connected (${localNames})` : '○ Local AI — Offline'}
+                <span className="field-hint inline">
+                  {' '}
+                  {localOn
+                    ? 'Priya can chat with your local models, free — no internet needed.'
+                    : 'Start Ollama or LM Studio on this computer to enable free local AI (Ollama: http://127.0.0.1:11434, LM Studio: http://127.0.0.1:1234).'}
+                </span>
+              </div>
+              {providers.length > 0 && (
+                <div className="dashboard-table">
+                  <div className="dash-row dash-head">
+                    <span>Provider</span>
+                    <span>Tier</span>
+                    <span>Status</span>
+                    <span>Model</span>
+                  </div>
+                  {providers.map((p) => (
+                    <div key={p.id} className="dash-row">
+                      <span>{p.name}{p.selected ? ' ⭐' : ''}</span>
+                      <span><span className={`tier-chip tier-${p.tier || 'paid'}`}>{TIER_LABEL[p.tier] || 'CUSTOM'}</span></span>
+                      <span><span className={`state-chip state-${rowStateClass(p)}`}>{rowStateText(p)}</span>{p.remaining ? ` · ${p.remaining} req left` : ''}</span>
+                      <span className="dash-model">{p.model || '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="field-hint">
+                <strong>How Priya routes requests:</strong> FREE (your key, free tier) → NO-KEY (public endpoint / local)
+                → PAID (only if you added a key — never auto-spent). One failing provider never breaks the chat.
+              </p>
+            </div>
           </div>
 
           {/* ------- Voice ------- */}

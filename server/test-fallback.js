@@ -3,15 +3,18 @@
 // Fallback simulation tests for server/providers.js.
 // Runs the REAL fallback code path with a stubbed global fetch:
 //   1. gemini 429 -> falls back to groq (200) -> success
-//   2. all providers 429 -> friendly error, gemini put in cooldown
+//   2. all providers 429 -> ALL_UNAVAILABLE error, providers cooled down
 //   3. cooldown: gemini is skipped after a 429
 //   4. first provider succeeds -> no fallback needed
-//   5. 401 (bad key) -> moves to next provider without treating as rate limit
+//   5. 401 (bad key) -> moves to next provider + blocks the bad key
+
+process.env.PRIYA_STORE_DISABLED = '1'; // store read-only + empty
+process.env.PRIYA_HEALTH_DISABLED = '1'; // health in-memory (no disk writes)
 
 const { callWithFallback, availableProviders } = require('./providers');
+const health = require('./provider-health');
 
 process.env.CHAT_PROVIDERS = 'gemini,groq,openrouter';
-process.env.PRIYA_STORE_DISABLED = '1';
 
 function json(status, obj) {
   return {
@@ -66,42 +69,45 @@ async function main() {
   const avail = availableProviders().map((p) => p.name);
   check('T3 availableProviders excludes gemini', !avail.includes('gemini'), avail);
 
-  // --- Test 5: 401 on gemini -> groq succeeds (not cooldown-eligible, still moves on) ---
+  // --- Test 5: 401 on gemini -> groq succeeds (bad key blocks gemini, not groq) ---
   global.fetch = async (url) => (url.includes('generativelanguage') ? unauth() : groqOk());
   r = await callWithFallback({ system: 's', messages: [{ role: 'user', content: 'hi' }] });
   check('T5 401 moves to next provider', r.provider === 'groq', r);
 
-  // --- Test 2: all providers 429 -> friendly error ---
+  // --- Test 2: all providers 429 -> ALL_UNAVAILABLE (incl. no-key fallback) ---
   global.fetch = async () => rl();
   let threw = false;
   try {
     await callWithFallback({ system: 's', messages: [{ role: 'user', content: 'hi' }] });
   } catch (e) {
     threw = true;
-    check('T2 friendly rate-limit error', /rate limit/i.test(e.message), e.message);
-    check('T2 status preserved', e.status === 429, e.status);
+    check('T2 ALL_UNAVAILABLE code', e.code === 'ALL_UNAVAILABLE' && e.status === 503, e.code);
+    check('T2 honest message', /All currently configured AI providers are unavailable/i.test(e.message), e.message);
   }
   check('T2 all-down throws', threw);
 
-  // --- Test 4: first provider succeeds directly ---
-  // openrouter is the only one not in cooldown now; give it a fresh config via env check
+  // --- Test 4: first available provider succeeds directly ---
+  // gemini blocked (401), groq cooled (429) -> openrouter (fresh key) wins.
   global.fetch = async (url) => (url.includes('openrouter') ? groqOk() : geminiOk());
   process.env.OPENROUTER_API_KEY = 'fake-or';
   r = await callWithFallback({ system: 's', messages: [{ role: 'user', content: 'hi' }] });
   check('T4 openrouter succeeds directly', r.provider === 'openrouter' && r.text.includes('groq'), r);
 
-  // --- Test 6: nothing configured -> MISSING_KEY ---
+  // --- Test 6: no keys at all -> no-key fallback (pollinations) is tried, and
+  // when even that fails the error is ALL_UNAVAILABLE (never MISSING_KEY,
+  // because Priya always has a no-key option).
   delete process.env.GEMINI_API_KEY;
   delete process.env.GROQ_API_KEY;
   delete process.env.OPENROUTER_API_KEY;
+  health.resetAll(); // clear cooldowns from T2 so the no-key fallback is tried
   threw = false;
   try {
     await callWithFallback({ system: 's', messages: [{ role: 'user', content: 'hi' }] });
   } catch (e) {
     threw = true;
-    check('T6 MISSING_KEY code', e.code === 'MISSING_KEY' && e.status === 503, e);
+    check('T6 ALL_UNAVAILABLE code without keys', e.code === 'ALL_UNAVAILABLE' && e.status === 503, e.code);
   }
-  check('T6 throws when nothing configured', threw);
+  check('T6 throws when even the no-key fallback fails', threw);
 
   global.fetch = realFetch;
 

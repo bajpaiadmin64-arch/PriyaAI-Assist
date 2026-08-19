@@ -48,12 +48,11 @@ async function chatCompat(cfg, { system, messages, temperature, maxTokens, signa
 
   let res;
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
     res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${cfg.apiKey}`
-      },
+      headers,
       body: JSON.stringify(body),
       signal
     });
@@ -81,7 +80,17 @@ async function chatCompat(cfg, { system, messages, temperature, maxTokens, signa
     throw err;
   }
 
-  return { text: text.trim(), model: cfg.model };
+  // Pass through the provider's rate-limit header so the health tracker can
+  // show remaining requests (Groq/OpenRouter expose x-ratelimit-remaining-*).
+  let remaining = null;
+  try {
+    const h = res && res.headers && res.headers.get;
+    if (typeof h === 'function') {
+      remaining = res.headers.get('x-ratelimit-remaining-requests') || res.headers.get('x-ratelimit-remaining') || null;
+    }
+  } catch (e) { /* header read is best-effort */ }
+
+  return { text: text.trim(), model: cfg.model, remaining: remaining ? Number(remaining) : null };
 }
 
 module.exports = { chatCompat };

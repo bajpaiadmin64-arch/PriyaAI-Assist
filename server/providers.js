@@ -1,26 +1,30 @@
 'use strict';
 
 const store = require('./provider-store');
-const { findProvider, defaultOrder } = require('./model-catalog');
-const { chatWith } = require('./provider-system');
+const { findProvider } = require('./model-catalog');
+const { chatWith, classify } = require('./provider-system');
+const health = require('./provider-health');
 
 /**
- * Provider registry + fallback loop.
+ * Provider registry + FREE-FIRST automatic fallback router.
  *
  * Providers come from the dynamic store (Settings UI) + environment keys.
- * Chain order: selected provider first, then stored order / CHAT_PROVIDERS
- * env / catalog order. Only providers with a configured key are used.
- * - On rate-limit (429) / quota / 5xx / network errors: mark the provider
- *   "in cooldown" for a short time and move to the next one automatically.
- * - Transient failures get one retry with exponential backoff.
- * - Invalid-key (401/403) errors move on but do NOT mark cooldown; the
- *   error surfaces so the user can fix the key.
+ * Candidates run in this order (free-first, verified Aug 2026):
+ *   1. the user's selected provider (explicit choice — always first),
+ *   2. FREE-tier providers with a configured key (gemini, groq, openrouter,
+ *      mistral, huggingface),
+ *   3. NO-KEY providers (pollinations public endpoint; local Ollama / LM
+ *      Studio when a local server is detected),
+ *   4. PAID providers — ONLY when the user has explicitly configured a key;
+ *      they are never auto-chosen on their own.
+ *
+ * Health tracking (provider-health.js, persisted on disk):
+ *   - 429 / 5xx / network → short cooldown (60s → 5min → 30min → 2h for
+ *     repeated rate limits) then automatic fallback to the next provider.
+ *   - 401/403/quota/model/endpoint → 12h block (no point retrying a dead
+ *     config); clearing/saving a key resets it instantly.
+ *   - A success resets the provider and records it as lastWorking.
  */
-
-const COOLDOWN_MS = 90 * 1000; // after a 429/5xx, skip this provider for 90s
-
-// In-memory cooldown map (per process). Restart clears it — safe.
-const cooldownUntil = new Map();
 
 function buildRegistry() {
   const reg = {};
@@ -30,7 +34,7 @@ function buildRegistry() {
     const entry = findProvider(id);
     reg[id] = {
       label: entry ? entry.name : id,
-      configured: () => !!store.getKey(id),
+      configured: () => !!store.getKey(id) || (entry ? entry.keyRequired === false : false),
       model: () => {
         const row = store.list().find((p) => p.id === id);
         return (row && row.model) || (entry && entry.models && entry.models[0] && entry.models[0].id) || null;
@@ -55,25 +59,26 @@ function isTransient(e) {
   );
 }
 
-function markCooldown(name) {
-  cooldownUntil.set(name, Date.now() + COOLDOWN_MS);
-}
-
-function remainingCooldown(name) {
-  const until = cooldownUntil.get(name) || 0;
-  return Math.max(0, Math.ceil((until - Date.now()) / 1000));
+/** Local providers are only candidates when their server is detected running. */
+function isLocalLive(name) {
+  const entry = findProvider(name);
+  if (!entry || !entry.local) return true;
+  const local = health.localStatus();
+  return name === 'ollama' ? !!local.ollama : name === 'lmstudio' ? !!local.lmstudio : true;
 }
 
 /**
- * Available providers in configured order (skips unconfigured + in-cooldown).
+ * Available providers in configured order (skips unconfigured, in-cooldown,
+ * blocked and undetected-local providers).
  * @returns {Array<{name:string, def:object}>}
  */
 function availableProviders() {
   return store
     .getOrder()
     .filter((name) => registry[name])
-    .filter((name) => remainingCooldown(name) === 0)
     .filter((name) => registry[name].configured())
+    .filter((name) => health.isAvailable(name))
+    .filter((name) => isLocalLive(name))
     .map((name) => ({ name, def: registry[name] }));
 }
 
@@ -87,7 +92,8 @@ function availableProviders() {
  * @param {AbortSignal} [opts.signal]
  * @param {string} [opts.providerId]  force a specific provider (must be configured)
  * @returns {Promise<{text:string, provider:string, model:string}>}
- * @throws {Error} with a friendly message when ALL providers fail.
+ * @throws {Error} code 'MISSING_KEY' when nothing is configured,
+ *                 code 'ALL_UNAVAILABLE' when everything failed.
  */
 async function callWithFallback({ system, messages, temperature, maxTokens, signal, providerId }) {
   let candidates = availableProviders();
@@ -95,25 +101,26 @@ async function callWithFallback({ system, messages, temperature, maxTokens, sign
     const forced = candidates.find((c) => c.name === providerId);
     if (forced) candidates = [forced];
     else {
-      // Forced provider not configured/available — fall back to the chain but
-      // surface a clear error if nothing works.
-      const configured = store.getKey(providerId) || providerId === 'custom';
+      const entry = findProvider(providerId);
+      const configured = !!store.getKey(providerId) || (entry && entry.keyRequired === false);
       if (!configured) {
         const err = new Error(`The selected model provider is not configured (${providerId}). Add its API key in Settings → AI Models & API.`);
         err.status = 503;
         err.code = 'MISSING_KEY';
         throw err;
       }
+      // Forced provider configured but cooldown/blocked/local-offline → it is
+      // skipped by availableProviders() above; fall back to the rest of the chain.
     }
   }
   if (candidates.length === 0) {
-    const err = new Error('No AI provider is configured. Add an API key in Settings → AI Models & API, or set GEMINI_API_KEY / SARVAM_API_KEY / GROQ_API_KEY on the server.');
+    const err = new Error('No AI provider is configured or reachable. Add a free API key in Settings → AI Models & API (Gemini, Groq, OpenRouter, Mistral), or start Ollama / LM Studio locally.');
     err.status = 503;
     err.code = 'MISSING_KEY';
     throw err;
   }
 
-  const backoff = [500, 1500]; // ms per retry round
+  const backoff = [500, 1500]; // ms per retry round (transient only)
   let lastError = null;
 
   for (const { name, def } of candidates) {
@@ -122,47 +129,67 @@ async function callWithFallback({ system, messages, temperature, maxTokens, sign
         await new Promise((r) => setTimeout(r, backoff[attempt - 1]));
       }
       try {
-        const { text, model } = await def.call({
+        const { text, model, remaining } = await def.call({
           system,
           messages,
           temperature,
           maxTokens,
           signal
         });
+        health.recordSuccess(name);
+        if (remaining) health.setRemaining(name, remaining);
         return { text, provider: name, model: model || def.model() };
       } catch (e) {
         lastError = e;
         if (isTransient(e) && attempt < backoff.length - 1) {
-          continue; // retry same provider with backoff
+          continue; // retry same provider once with backoff
         }
-        markCooldown(name); // exhausted this provider for a while
+        health.recordFailure(name, { code: classify(e.status, e.code, e.message), status: e.status, message: e.message });
         break; // move to next provider
       }
     }
   }
 
   if (lastError) {
-    lastError.status = lastError.status >= 400 && lastError.status < 600 ? lastError.status : 503;
-    throw lastError;
+    // Every candidate failed — all-unavailable is the honest answer.
+    const err = new Error('All currently configured AI providers are unavailable. Please add another API key or try again later.');
+    err.status = 503;
+    err.code = 'ALL_UNAVAILABLE';
+    throw err;
   }
 
-  const err = new Error('All AI providers are temporarily unavailable. Please try again in a moment.');
+  const err = new Error('All currently configured AI providers are unavailable. Please add another API key or try again later.');
   err.status = 503;
+  err.code = 'ALL_UNAVAILABLE';
   throw err;
 }
 
-/** Status for /api/health: every provider in order + configured + model + cooldown. */
+/** Status for /api/health + /api/providers: tier, configured, model, health. */
 function providerStatus() {
   return store
     .getOrder()
     .filter((name) => registry[name])
-    .map((name) => ({
-      name,
-      label: registry[name].label,
-      configured: registry[name].configured(),
-      model: registry[name].configured() ? registry[name].model() : null,
-      cooldownSec: remainingCooldown(name)
-    }));
+    .map((name) => {
+      const entry = findProvider(name);
+      const h = health.statusFor(name);
+      return {
+        name,
+        label: registry[name].label,
+        configured: registry[name].configured(),
+        model: registry[name].configured() ? registry[name].model() : null,
+        tier: entry ? entry.tier : 'custom',
+        freeLabel: entry ? entry.freeLabel : null,
+        keyRequired: entry ? entry.keyRequired !== false : true,
+        local: entry ? !!entry.local : false,
+        state: h.state,
+        errorCode: h.errorCode,
+        reason: h.reason,
+        cooldownSec: h.cooldownSec,
+        failures: h.failures,
+        lastSuccess: h.lastSuccess,
+        remaining: h.remaining
+      };
+    });
 }
 
-module.exports = { callWithFallback, providerStatus, availableProviders, registry }; // registry exported for tests
+module.exports = { callWithFallback, providerStatus, availableProviders, registry, isTransient }; // registry exported for tests

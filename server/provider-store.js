@@ -12,10 +12,12 @@
 const fs = require('fs');
 const path = require('path');
 
+const { findProvider } = require('./model-catalog');
+
 const DATA_DIR = path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'providers.json');
 
-const DEFAULT_ORDER = ['gemini', 'sarvam', 'groq', 'openrouter', 'openai', 'deepseek', 'anthropic', 'xai', 'mistral', 'together', 'cerebras', 'huggingface', 'perplexity'];
+const DEFAULT_ORDER = ['gemini', 'groq', 'openrouter', 'mistral', 'huggingface', 'pollinations', 'ollama', 'lmstudio', 'sarvam', 'deepseek', 'openai', 'anthropic', 'xai', 'together', 'cerebras', 'perplexity'];
 
 let cache = null; // { providers: {id: {apiKey, model, baseUrl, name}}, selected: id, order: [] }
 
@@ -149,7 +151,15 @@ function getSelected() {
 
 function setSelected(id) {
   const s = load();
-  if (isConfigured(id) || (s.providers[id] && s.providers[id].apiKey)) {
+  if (!id) {
+    s.selected = null;
+    persist();
+    return null;
+  }
+  const entry = findProvider(id);
+  // No-key providers (pollinations / local servers) can be selected without a key.
+  const usable = isConfigured(id) || (s.providers[id] && s.providers[id].apiKey) || (entry && entry.keyRequired === false);
+  if (usable) {
     s.selected = id;
     persist();
     return id;
