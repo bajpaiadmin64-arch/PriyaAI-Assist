@@ -83,6 +83,7 @@ export default function ChatPanel({
                     ))}
                   </select>
                   <svg viewBox="0 0 24 24" className="mp-chevron" aria-hidden="true"><path d="M7 10l5 5 5-5z" /></svg>
+                  <span className="mp-status" title="Backend connected">CONNECTED</span>
                 </div>
               )}
               <span className={`web-indicator ${settings.webSearch ? 'on' : ''}`} title="Web search mode">
