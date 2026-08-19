@@ -7,7 +7,8 @@ import React from 'react';
  */
 export default function PriyaOrb({ state = 'idle', size = 'md', className = '' }) {
   return (
-    <div className={`orb orb-${size} orb-state-${state} ${className}`} role="img" aria-label="Priya AI orb">
+    <div className={`orb orb-${size} orb-state-${state} ${className}`} role="img" aria-label={`Priya AI orb — ${state}`}>
+      <div className="orb-halo" aria-hidden="true" />
       <div className="orb-glow" aria-hidden="true" />
       <div className="orb-core" aria-hidden="true">
         <svg viewBox="0 0 100 100" className="orb-svg">
